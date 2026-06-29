@@ -969,15 +969,33 @@ def plan_stripboard(
             optimized_index_set
         )
         planning_stats.skipped_optimization_candidates += skipped_optimizations
+        if verified_candidate_entries:
+            _logger.info(
+                "Optimizing routed candidate shortlist verified=%s optimized=%s "
+                "skipped=%s candidate_limit=%s",
+                len(verified_candidate_entries),
+                len(optimized_index_set),
+                skipped_optimizations,
+                _routing_optimization_candidate_limit(),
+            )
+        optimized_position = 0
         for index, (
-            _pre_optimization_score,
+            pre_optimization_score,
             layout,
             report,
             placement_score,
         ) in enumerate(verified_candidate_entries):
             if index not in optimized_index_set:
                 continue
+            optimized_position += 1
             planning_stats.optimized_candidates += 1
+            _logger.info(
+                "Optimizing routed candidate %s/%s pre_score=%s %s",
+                optimized_position,
+                len(optimized_index_set),
+                pre_optimization_score,
+                _layout_log_summary(layout),
+            )
             layout, report = _optimize_routed_stripboard_layout(
                 layout,
                 circuit,
