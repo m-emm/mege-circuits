@@ -731,6 +731,9 @@ def plan_stripboard(
                 continue
             report = verify_stripboard_layout(layout, circuit)
 
+        if report.ok:
+            layout, report = _left_compact_stripboard_layout(layout, circuit)
+
         score = _routing_layout_score(layout, report, placement_score)
         if best_score is None or score < best_score:
             best_layout = layout
@@ -758,6 +761,478 @@ def score_stripboard_layout(layout, circuit, report=None):
         _layout_used_height(layout),
         _layout_used_width(layout),
     )
+
+
+def _left_compact_stripboard_layout(layout, circuit, *, trim_margin=1):
+    report = verify_stripboard_layout(layout, circuit)
+    if not report.ok:
+        return layout, report
+
+    compacted = layout
+    compacted_report = report
+    compacted_score = _left_compaction_score(compacted)
+    max_iterations = max(
+        1,
+        _left_compaction_unit_count(compacted) * compacted.board.width_pitches * 2 + 1,
+    )
+
+    for _ in range(max_iterations):
+        accepted = None
+        for unit in _left_compaction_units(compacted):
+            accepted = _left_compaction_best_move(
+                compacted,
+                circuit,
+                unit,
+                compacted_score,
+            )
+            if accepted is not None:
+                break
+        if accepted is None:
+            break
+        compacted, compacted_report, compacted_score = accepted
+
+    return _trim_left_compacted_layout(
+        compacted,
+        circuit,
+        compacted_report,
+        trim_margin=trim_margin,
+    )
+
+
+def _left_compaction_unit_count(layout):
+    return (
+        len(layout.placed_components)
+        + len(layout.connectors)
+        + len(layout.cuts)
+        + len(layout.jumpers) * 2
+    )
+
+
+def _left_compaction_units(layout):
+    footprint_map = _footprints_by_name(layout.footprints)
+    units = []
+    components = []
+    for placed_component in layout.placed_components:
+        holes = _placed_component_occupied_holes(placed_component, footprint_map)
+        components.append(
+            (
+                _holes_min_col(holes),
+                _holes_min_row(holes),
+                placed_component.refdes,
+                ("component", placed_component.refdes),
+            )
+        )
+    units.extend(item[-1] for item in sorted(components))
+
+    connectors = []
+    for connector in layout.connectors:
+        connectors.append(
+            (
+                connector.col,
+                connector.row,
+                connector.name,
+                ("connector", connector.name),
+            )
+        )
+    units.extend(item[-1] for item in sorted(connectors))
+
+    cuts = []
+    for cut in layout.cuts:
+        cuts.append((cut.col, cut.row, ("cut", cut.row, cut.col)))
+    units.extend(item[-1] for item in sorted(cuts))
+
+    jumper_endpoints = []
+    for index, jumper in enumerate(layout.jumpers):
+        for endpoint_name, hole in (("start", jumper.start), ("end", jumper.end)):
+            jumper_endpoints.append(
+                (
+                    hole[1],
+                    hole[0],
+                    jumper.net_name,
+                    index,
+                    endpoint_name,
+                    ("jumper", index, endpoint_name),
+                )
+            )
+    units.extend(item[-1] for item in sorted(jumper_endpoints))
+    return tuple(units)
+
+
+def _left_compaction_best_move(layout, circuit, unit, current_score):
+    unit_type = unit[0]
+    if unit_type == "component":
+        return _left_compaction_best_component_move(
+            layout,
+            circuit,
+            unit[1],
+            current_score,
+        )
+    if unit_type == "connector":
+        return _left_compaction_best_connector_move(
+            layout,
+            circuit,
+            unit[1],
+            current_score,
+        )
+    if unit_type == "cut":
+        return _left_compaction_best_cut_move(
+            layout,
+            circuit,
+            unit[1:],
+            current_score,
+        )
+    if unit_type == "jumper":
+        return _left_compaction_best_jumper_endpoint_move(
+            layout,
+            circuit,
+            unit[1],
+            unit[2],
+            current_score,
+        )
+    return None
+
+
+def _left_compaction_best_component_move(layout, circuit, refdes, current_score):
+    footprint_map = _footprints_by_name(layout.footprints)
+    placed_component = _layout_component_by_refdes(layout, refdes)
+    if placed_component is None:
+        return None
+    holes = _placed_component_occupied_holes(placed_component, footprint_map)
+    min_col = _holes_min_col(holes)
+    if min_col <= 0:
+        return None
+
+    row, col = placed_component.origin
+    for delta in range(min_col, 0, -1):
+        moved = PlacedComponent(
+            refdes=placed_component.refdes,
+            footprint_name=placed_component.footprint_name,
+            origin=(row, col - delta),
+            rotation=placed_component.rotation,
+        )
+        candidate_components = tuple(
+            moved if component.refdes == refdes else component
+            for component in layout.placed_components
+        )
+        accepted = _left_compaction_verified_candidate(
+            layout,
+            circuit,
+            current_score,
+            placed_components=candidate_components,
+        )
+        if accepted is not None:
+            return accepted
+    return None
+
+
+def _left_compaction_best_connector_move(layout, circuit, name, current_score):
+    connector = _layout_connector_by_name(layout, name)
+    if connector is None or connector.col <= 0:
+        return None
+
+    for col in range(0, connector.col):
+        moved = PlacedConnector(
+            name=connector.name,
+            net_name=connector.net_name,
+            hole=(connector.row, col),
+            label=connector.label,
+            kind=connector.kind,
+        )
+        candidate_connectors = tuple(
+            moved if candidate.name == name else candidate
+            for candidate in layout.connectors
+        )
+        accepted = _left_compaction_verified_candidate(
+            layout,
+            circuit,
+            current_score,
+            connectors=candidate_connectors,
+        )
+        if accepted is not None:
+            return accepted
+    return None
+
+
+def _left_compaction_best_cut_move(layout, circuit, cut_key, current_score):
+    row, col = cut_key
+    cut_index = _layout_cut_index(layout, row, col)
+    if cut_index is None or col <= 0:
+        return None
+
+    blocked_holes = _left_compaction_cut_blocked_holes(layout, circuit, cut_index)
+    for candidate_col in range(0, col):
+        if (row, candidate_col) in blocked_holes:
+            continue
+        moved = StripboardCut(row=row, col=candidate_col)
+        candidate_cuts = tuple(
+            moved if index == cut_index else cut
+            for index, cut in enumerate(layout.cuts)
+        )
+        accepted = _left_compaction_verified_candidate(
+            layout,
+            circuit,
+            current_score,
+            cuts=candidate_cuts,
+        )
+        if accepted is not None:
+            return accepted
+    return None
+
+
+def _left_compaction_best_jumper_endpoint_move(
+    layout,
+    circuit,
+    jumper_index,
+    endpoint_name,
+    current_score,
+):
+    if jumper_index >= len(layout.jumpers):
+        return None
+    jumper = layout.jumpers[jumper_index]
+    hole = jumper.start if endpoint_name == "start" else jumper.end
+    row, col = hole
+    min_col = _left_compaction_segment_min_col(layout, row, col)
+    if col <= min_col:
+        return None
+
+    blocked_holes = _left_compaction_jumper_blocked_holes(
+        layout,
+        circuit,
+        jumper_index,
+        endpoint_name,
+    )
+    for candidate_col in range(min_col, col):
+        candidate_hole = (row, candidate_col)
+        if candidate_hole in blocked_holes:
+            continue
+        moved = (
+            Jumper(start=candidate_hole, end=jumper.end, net_name=jumper.net_name)
+            if endpoint_name == "start"
+            else Jumper(
+                start=jumper.start, end=candidate_hole, net_name=jumper.net_name
+            )
+        )
+        candidate_jumpers = tuple(
+            moved if index == jumper_index else candidate
+            for index, candidate in enumerate(layout.jumpers)
+        )
+        accepted = _left_compaction_verified_candidate(
+            layout,
+            circuit,
+            current_score,
+            jumpers=candidate_jumpers,
+        )
+        if accepted is not None:
+            return accepted
+    return None
+
+
+def _left_compaction_verified_candidate(
+    layout,
+    circuit,
+    current_score,
+    *,
+    board=None,
+    placed_components=None,
+    cuts=None,
+    jumpers=None,
+    connectors=None,
+):
+    candidate, report = _rebuild_planned_stripboard_layout(
+        layout,
+        circuit,
+        board=layout.board if board is None else board,
+        placed_components=(
+            layout.placed_components if placed_components is None else placed_components
+        ),
+        cuts=layout.cuts if cuts is None else cuts,
+        jumpers=layout.jumpers if jumpers is None else jumpers,
+        connectors=layout.connectors if connectors is None else connectors,
+    )
+    if candidate is None or not report.ok:
+        return None
+    if _left_compaction_has_cut_blocker_collision(candidate):
+        return None
+    candidate_score = _left_compaction_score(candidate)
+    if candidate_score >= current_score:
+        return None
+    return candidate, report, candidate_score
+
+
+def _rebuild_planned_stripboard_layout(
+    layout,
+    circuit,
+    *,
+    board,
+    placed_components,
+    cuts,
+    jumpers,
+    connectors,
+):
+    try:
+        candidate = create_manual_stripboard_layout(
+            circuit,
+            board=board,
+            footprints=layout.footprints,
+            placements={component.refdes: component for component in placed_components},
+            cuts=cuts,
+            jumpers=jumpers,
+            connectors=connectors,
+            annotations=layout.annotations,
+        )
+    except (TypeError, ValueError):
+        return None, _routing_failure_report("Compaction candidate is invalid.")
+    return candidate, verify_stripboard_layout(candidate, circuit)
+
+
+def _trim_left_compacted_layout(layout, circuit, report, *, trim_margin):
+    margin = max(0, _coerce_integer(trim_margin, "trim_margin"))
+    target_width = min(
+        layout.board.width_pitches,
+        max(1, _layout_used_width(layout) + margin),
+    )
+    if target_width == layout.board.width_pitches:
+        return layout, report
+
+    board = Stripboard(
+        width_pitches=target_width,
+        height_pitches=layout.board.height_pitches,
+        strip_direction=layout.board.strip_direction,
+        pitch_mm=layout.board.pitch_mm,
+    )
+    candidate, candidate_report = _rebuild_planned_stripboard_layout(
+        layout,
+        circuit,
+        board=board,
+        placed_components=layout.placed_components,
+        cuts=layout.cuts,
+        jumpers=layout.jumpers,
+        connectors=layout.connectors,
+    )
+    if candidate is None or not candidate_report.ok:
+        return layout, report
+    return candidate, candidate_report
+
+
+def _left_compaction_score(layout):
+    return (
+        _layout_used_width(layout),
+        layout.board.width_pitches,
+        _layout_col_sum(layout),
+        _layout_jumper_length(layout),
+    )
+
+
+def _left_compaction_has_cut_blocker_collision(layout):
+    cut_holes = {(cut.row, cut.col) for cut in layout.cuts}
+    return any((blocker.row, blocker.col) in cut_holes for blocker in layout.blockers)
+
+
+def _layout_col_sum(layout):
+    return sum(
+        (
+            *[pin.col for pin in _layout_score_pins(layout)],
+            *[connector.col for connector in layout.connectors],
+            *[cut.col for cut in layout.cuts],
+            *[
+                hole[1]
+                for jumper in layout.jumpers
+                for hole in (jumper.start, jumper.end)
+            ],
+            *[blocker.col for blocker in layout.blockers],
+        )
+    )
+
+
+def _layout_component_by_refdes(layout, refdes):
+    for placed_component in layout.placed_components:
+        if placed_component.refdes == refdes:
+            return placed_component
+    return None
+
+
+def _layout_connector_by_name(layout, name):
+    for connector in layout.connectors:
+        if connector.name == name:
+            return connector
+    return None
+
+
+def _layout_cut_index(layout, row, col):
+    for index, cut in enumerate(layout.cuts):
+        if cut.row == row and cut.col == col:
+            return index
+    return None
+
+
+def _placed_component_occupied_holes(placed_component, footprint_map):
+    footprint = _require_footprint(footprint_map, placed_component.footprint_name)
+    return tuple(
+        _absolute_footprint_point(
+            placed_component.origin,
+            placed_component.rotation,
+            point,
+        )
+        for point in (*footprint.pins.values(), *footprint.blockers)
+    )
+
+
+def _holes_min_col(holes):
+    return min((col for _row, col in holes), default=0)
+
+
+def _holes_min_row(holes):
+    return min((row for row, _col in holes), default=0)
+
+
+def _left_compaction_segment_min_col(layout, row, col):
+    left_cut = max(
+        (cut.col for cut in layout.cuts if cut.row == row and cut.col < col),
+        default=-1,
+    )
+    return left_cut + 1
+
+
+def _left_compaction_cut_blocked_holes(layout, circuit, cut_index):
+    return _left_compaction_occupied_holes(
+        layout,
+        circuit,
+        ignored_cut_index=cut_index,
+    )
+
+
+def _left_compaction_jumper_blocked_holes(
+    layout,
+    circuit,
+    jumper_index,
+    endpoint_name,
+):
+    return _left_compaction_occupied_holes(
+        layout,
+        circuit,
+        ignored_jumper_endpoint=(jumper_index, endpoint_name),
+    )
+
+
+def _left_compaction_occupied_holes(
+    layout,
+    circuit,
+    *,
+    ignored_cut_index=None,
+    ignored_jumper_endpoint=None,
+):
+    holes = {pin.hole for pin in placed_component_pins(layout, circuit)}
+    holes.update(connector.hole for connector in layout.connectors)
+    holes.update((blocker.row, blocker.col) for blocker in layout.blockers)
+    for index, cut in enumerate(layout.cuts):
+        if index != ignored_cut_index:
+            holes.add((cut.row, cut.col))
+    for index, jumper in enumerate(layout.jumpers):
+        for endpoint_name, hole in (("start", jumper.start), ("end", jumper.end)):
+            if ignored_jumper_endpoint == (index, endpoint_name):
+                continue
+            holes.add(hole)
+    return holes
 
 
 def write_stripboard_build_outputs(
