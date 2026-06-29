@@ -50,6 +50,9 @@ fallback_version = "0.1.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "slow: slow integration or optimizer regression tests skipped by default; run with --runslow",
+]
 
 [tool.black]
 line-length = 88

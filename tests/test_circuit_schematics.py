@@ -1,8 +1,8 @@
 import pytest
 
 import mege_circuits.dsl as circuit_dsl
-from examples.integration import tb6600_stripboard_interface as tb6600_interface
 from examples.high_side_switch_v3 import create_high_side_switch
+from examples.integration import tb6600_stripboard_interface as tb6600_interface
 from examples.integration.tb6600_stripboard_interface import (
     SCHEMATIC_ARTIFACT_STEM,
     create_schema_for_tb6600_interface,
@@ -262,9 +262,12 @@ def test_render_schemdraw_writes_png(tmp_path):
     assert outfile.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
-def test_tb6600_integration_examples_render_stable_artifacts():
+@pytest.mark.slow
+def test_tb6600_integration_examples_render_stable_artifacts(tb6600_verified_plan):
     schematic_svg, schematic_png = render_tb6600_schematic()
-    stripboard_outputs = render_tb6600_stripboard_build()
+    stripboard_outputs = render_tb6600_stripboard_build(
+        verified_plan=tb6600_verified_plan
+    )
     stripboard_svg = stripboard_outputs.top_svg
     stripboard_png = stripboard_outputs.top_png
 

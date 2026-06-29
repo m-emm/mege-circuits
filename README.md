@@ -90,6 +90,14 @@ pip install -e ".[testing]"
 python -m pytest
 ```
 
+Slow integration and optimizer regressions are skipped by default. Run them
+explicitly when changing the stripboard router or generated TB6600 artifacts:
+
+```bash
+python -m pytest --runslow
+python -m pytest --runslow -m slow
+```
+
 CI runs the test suite on Python 3.11 and 3.12.
 
 ## License

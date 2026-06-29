@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -27,6 +28,19 @@ LAYOUT_CONNECTOR_RADIUS = 0.135
 LAYOUT_COMPONENT_BODY_FILL = "#111827"
 LAYOUT_COMPONENT_BODY_LABEL_FILL = "#ffffff"
 DIRECTIONAL_TERMINAL_LABEL_KINDS = frozenset(("bjt_npn", "pmos", "zener"))
+
+
+@dataclass
+class _StripboardPlanningStats:
+    verified_candidates: int = 0
+    optimized_candidates: int = 0
+    skipped_optimization_candidates: int = 0
+    layout_rebuilds: int = 0
+    layout_verifications: int = 0
+
+
+_STRIPBOARD_PLANNING_STATS = ContextVar("stripboard_planning_stats", default=None)
+_LAST_STRIPBOARD_PLANNING_STATS = None
 
 
 @dataclass(frozen=True)
@@ -502,6 +516,7 @@ def create_manual_stripboard_layout(
         annotations=tuple(str(annotation) for annotation in annotations),
         footprints=tuple(footprint_map[name] for name in sorted(footprint_map)),
     )
+    _record_stripboard_layout_rebuild()
     _validate_layout_geometry(layout, circuit, footprint_map)
     return layout
 
@@ -556,6 +571,7 @@ def extract_physical_netlist(layout, circuit):
 def verify_stripboard_layout(layout, circuit):
     """Return DRC, open-circuit, and short-circuit diagnostics for a layout."""
 
+    _record_stripboard_layout_verification()
     _validate_physical_inputs(layout, circuit)
     issues = list(_physical_layout_drc_issues(layout, circuit))
     if any(issue.severity == ERROR for issue in issues):
@@ -726,6 +742,7 @@ def plan_stripboard(
             code="unsupported_strip_direction",
         )
     routing_hints = _coerce_routing_hints(hints)
+    planning_stats, planning_stats_token = _begin_stripboard_planning_stats()
 
     _logger.info(
         "Planning stripboard layout circuit=%s board=%sx%s components=%s nets=%s "
@@ -757,6 +774,7 @@ def plan_stripboard(
         )
     except (TypeError, ValueError) as error:
         _logger.error("Stripboard planning input normalization failed: %s", error)
+        _finish_stripboard_planning_stats(planning_stats, planning_stats_token)
         return None, _routing_failure_report(str(error))
 
     net_rows = _routing_net_rows(circuit, routing_hints)
@@ -828,6 +846,7 @@ def plan_stripboard(
         manual_failures = 0
         jumper_failures = 0
         verified_candidates = 0
+        verified_candidate_entries = []
         for planned, placement_score in planned_states:
             _logger.debug(
                 "Evaluating placement candidate placement_score=%s placements=%s",
@@ -907,13 +926,65 @@ def plan_stripboard(
 
             if report.ok:
                 verified_candidates += 1
-                layout, report = _optimize_routed_stripboard_layout(
+                planning_stats.verified_candidates += 1
+                score = _routing_layout_score(
                     layout,
+                    report,
+                    placement_score,
                     circuit,
-                    locked_refdeses=fixed_placement_map,
-                    fixed_cuts=normalized_fixed_cuts,
-                    fixed_jumpers=normalized_fixed_jumpers,
                 )
+                verified_candidate_entries.append(
+                    (score, layout, report, placement_score)
+                )
+                continue
+
+            score = _routing_layout_score(layout, report, placement_score, circuit)
+            if best_score is None or score < best_score:
+                best_layout = layout
+                best_report = report
+                best_score = score
+                _logger.info(
+                    "New best stripboard candidate ok=%s %s errors=%s score=%s",
+                    report.ok,
+                    _layout_log_summary(layout),
+                    len(report.errors),
+                    score,
+                )
+            if report.ok and (run_best_score is None or score < run_best_score):
+                run_best_layout = layout
+                run_best_score = score
+
+        optimized_indexes = _routing_optimization_shortlist(
+            verified_candidate_entries,
+            current_best_jumper_count=(
+                len(best_layout.jumpers)
+                if best_layout is not None
+                and best_report is not None
+                and best_report.ok
+                else None
+            ),
+        )
+        optimized_index_set = set(optimized_indexes)
+        skipped_optimizations = len(verified_candidate_entries) - len(
+            optimized_index_set
+        )
+        planning_stats.skipped_optimization_candidates += skipped_optimizations
+        for index, (
+            _pre_optimization_score,
+            layout,
+            report,
+            placement_score,
+        ) in enumerate(verified_candidate_entries):
+            if index not in optimized_index_set:
+                continue
+            planning_stats.optimized_candidates += 1
+            layout, report = _optimize_routed_stripboard_layout(
+                layout,
+                circuit,
+                locked_refdeses=fixed_placement_map,
+                fixed_cuts=normalized_fixed_cuts,
+                fixed_jumpers=normalized_fixed_jumpers,
+            )
 
             score = _routing_layout_score(layout, report, placement_score, circuit)
             if best_score is None or score < best_score:
@@ -932,13 +1003,18 @@ def plan_stripboard(
                 run_best_score = score
 
         _logger.info(
-            "Finished placement order components=%s verified=%s cut_failures=%s "
-            "jumper_failures=%s rebuild_failures=%s",
+            "Finished placement order components=%s verified=%s optimized=%s "
+            "skipped_optimization=%s cut_failures=%s jumper_failures=%s "
+            "rebuild_failures=%s layout_rebuilds=%s layout_verifications=%s",
             component_order,
             verified_candidates,
+            len(optimized_index_set),
+            skipped_optimizations,
             cut_failures,
             jumper_failures,
             manual_failures,
+            planning_stats.layout_rebuilds,
+            planning_stats.layout_verifications,
         )
         if run_best_layout is None:
             continue
@@ -965,13 +1041,25 @@ def plan_stripboard(
             )
 
     if best_layout is not None:
+        planning_stats = _finish_stripboard_planning_stats(
+            planning_stats,
+            planning_stats_token,
+        )
         _logger.info(
-            "Finished stripboard planning circuit=%s ok=%s %s errors=%s score=%s",
+            "Finished stripboard planning circuit=%s ok=%s %s errors=%s score=%s "
+            "verified_candidates=%s optimized_candidates=%s "
+            "skipped_optimization_candidates=%s layout_rebuilds=%s "
+            "layout_verifications=%s",
             _circuit_log_name(circuit),
             best_report.ok,
             _layout_log_summary(best_layout),
             len(best_report.errors),
             best_score,
+            planning_stats.verified_candidates,
+            planning_stats.optimized_candidates,
+            planning_stats.skipped_optimization_candidates,
+            planning_stats.layout_rebuilds,
+            planning_stats.layout_verifications,
         )
         return best_layout, best_report
     _logger.error(
@@ -980,6 +1068,7 @@ def plan_stripboard(
         last_routing_error
         or "No verified stripboard routing candidate could be built.",
     )
+    _finish_stripboard_planning_stats(planning_stats, planning_stats_token)
     return None, _routing_failure_report(
         last_routing_error or "No verified stripboard routing candidate could be built."
     )
@@ -999,6 +1088,31 @@ def score_stripboard_layout(layout, circuit, report=None):
         _layout_used_height(layout),
         _layout_used_width(layout),
     )
+
+
+def _begin_stripboard_planning_stats():
+    stats = _StripboardPlanningStats()
+    token = _STRIPBOARD_PLANNING_STATS.set(stats)
+    return stats, token
+
+
+def _finish_stripboard_planning_stats(stats, token):
+    global _LAST_STRIPBOARD_PLANNING_STATS
+    _LAST_STRIPBOARD_PLANNING_STATS = stats
+    _STRIPBOARD_PLANNING_STATS.reset(token)
+    return stats
+
+
+def _record_stripboard_layout_rebuild():
+    stats = _STRIPBOARD_PLANNING_STATS.get()
+    if stats is not None:
+        stats.layout_rebuilds += 1
+
+
+def _record_stripboard_layout_verification():
+    stats = _STRIPBOARD_PLANNING_STATS.get()
+    if stats is not None:
+        stats.layout_verifications += 1
 
 
 def _circuit_log_name(circuit):
@@ -4099,6 +4213,38 @@ def _routing_layout_score(layout, report, placement_score, circuit=None):
     )
 
 
+def _routing_optimization_shortlist(
+    verified_candidate_entries,
+    *,
+    current_best_jumper_count=None,
+):
+    if not verified_candidate_entries:
+        return ()
+
+    selected_indexes = set()
+    ranked_indexes = tuple(
+        index
+        for index, _entry in sorted(
+            enumerate(verified_candidate_entries),
+            key=lambda item: item[1][0],
+        )
+    )
+    selected_indexes.update(ranked_indexes[: _routing_optimization_candidate_limit()])
+    if current_best_jumper_count is not None:
+        selected_indexes.update(
+            index
+            for index, (_score, layout, _report, _placement_score) in enumerate(
+                verified_candidate_entries
+            )
+            if len(layout.jumpers) < current_best_jumper_count
+        )
+    return tuple(
+        index
+        for index in range(len(verified_candidate_entries))
+        if index in selected_indexes
+    )
+
+
 def _layout_pre_jumper_fragment_count(layout, circuit):
     if circuit is None or not layout.jumpers:
         return 0
@@ -4149,6 +4295,10 @@ def _routing_beam_width():
 
 def _routing_candidate_limit():
     return 192
+
+
+def _routing_optimization_candidate_limit():
+    return 12
 
 
 def _routing_shake_order_limit():

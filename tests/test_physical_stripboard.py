@@ -12,7 +12,6 @@ from examples.integration.tb6600_stripboard_interface import (
 from examples.integration.tb6600_stripboard_layout import (
     OBSOLETE_STRIPBOARD_ARTIFACT_STEMS,
     STRIPBOARD_ARTIFACT_STEM,
-    create_tb6600_verified_stripboard_plan,
     render_tb6600_stripboard_build,
 )
 from examples.voltage_divider import create_voltage_divider
@@ -978,10 +977,23 @@ def test_write_stripboard_build_outputs_writes_build_artifacts(tmp_path):
     assert data["layout"]["metrics"]["empty_holes"] >= 0
 
 
-def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(tmp_path):
-    _schema, circuit, layout, report = create_tb6600_verified_stripboard_plan()
+@pytest.mark.slow
+def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(
+    tmp_path,
+    tb6600_verified_plan,
+    tb6600_verified_plan_stats,
+):
+    _schema, circuit, layout, report = tb6600_verified_plan
 
     assert report.ok, report.summary()
+    planning_stats = tb6600_verified_plan_stats
+    assert planning_stats is not None
+    assert planning_stats.verified_candidates > planning_stats.optimized_candidates
+    assert (
+        planning_stats.optimized_candidates
+        <= physical._routing_optimization_candidate_limit()
+    )
+    assert planning_stats.verified_candidates >= 2 * planning_stats.optimized_candidates
     assert layout.board.width_pitches <= 14
     assert layout.board.height_pitches == 9
     assert len(layout.cuts) <= 5
@@ -1042,12 +1054,15 @@ def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(tmp_path):
     )
 
 
-def test_tb6600_build_outputs_include_only_verified_artifacts(tmp_path, caplog):
+@pytest.mark.slow
+def test_tb6600_build_outputs_include_only_verified_artifacts(
+    tmp_path,
+    caplog,
+    tb6600_verified_plan,
+):
     old_top_svg = tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}__old.svg"
     old_top_png = tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}__old.png"
-    old_projection_svg = (
-        tmp_path / f"{OBSOLETE_STRIPBOARD_ARTIFACT_STEMS[0]}__old.svg"
-    )
+    old_projection_svg = tmp_path / f"{OBSOLETE_STRIPBOARD_ARTIFACT_STEMS[0]}__old.svg"
     old_projection_latest = tmp_path / f"{OBSOLETE_STRIPBOARD_ARTIFACT_STEMS[0]}.svg"
     old_top_svg.write_text("old stripboard svg", encoding="utf-8")
     old_top_png.write_bytes(b"old stripboard png")
@@ -1055,7 +1070,10 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(tmp_path, caplog):
     old_projection_latest.write_text("old projection latest", encoding="utf-8")
 
     with caplog.at_level(logging.INFO):
-        outputs = render_tb6600_stripboard_build(tmp_path)
+        outputs = render_tb6600_stripboard_build(
+            tmp_path,
+            verified_plan=tb6600_verified_plan,
+        )
 
     assert all(path.exists() for path in outputs.as_tuple())
     assert not old_top_svg.exists()
@@ -1118,9 +1136,7 @@ def test_tb6600_stripboard_failure_preserves_existing_artifacts(tmp_path, monkey
     old_top_png = tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}__old.png"
     latest_top_svg = tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}.svg"
     latest_top_png = tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}.png"
-    old_projection_svg = (
-        tmp_path / f"{OBSOLETE_STRIPBOARD_ARTIFACT_STEMS[0]}__old.svg"
-    )
+    old_projection_svg = tmp_path / f"{OBSOLETE_STRIPBOARD_ARTIFACT_STEMS[0]}__old.svg"
     old_projection_latest = tmp_path / f"{OBSOLETE_STRIPBOARD_ARTIFACT_STEMS[0]}.svg"
     old_top_svg.write_text("old stripboard svg", encoding="utf-8")
     old_top_png.write_bytes(b"old stripboard png")
@@ -1137,7 +1153,9 @@ def test_tb6600_stripboard_failure_preserves_existing_artifacts(tmp_path, monkey
         partial.write_text("partial new stripboard", encoding="utf-8")
         raise RuntimeError("stripboard write failed")
 
-    monkeypatch.setattr(tb6600_layout, "create_tb6600_verified_stripboard_plan", fake_plan)
+    monkeypatch.setattr(
+        tb6600_layout, "create_tb6600_verified_stripboard_plan", fake_plan
+    )
     monkeypatch.setattr(tb6600_layout, "write_stripboard_build_outputs", failing_write)
 
     with pytest.raises(RuntimeError, match="stripboard write failed"):
@@ -1150,12 +1168,8 @@ def test_tb6600_stripboard_failure_preserves_existing_artifacts(tmp_path, monkey
     assert old_projection_svg.read_text(encoding="utf-8") == "old projection svg"
     assert old_projection_latest.read_text(encoding="utf-8") == "old projection latest"
     assert not tuple(tmp_path.glob(".tmp_*"))
-    assert tuple(tmp_path.glob(f"{STRIPBOARD_ARTIFACT_STEM}__*.svg")) == (
-        old_top_svg,
-    )
-    assert tuple(tmp_path.glob(f"{STRIPBOARD_ARTIFACT_STEM}__*.png")) == (
-        old_top_png,
-    )
+    assert tuple(tmp_path.glob(f"{STRIPBOARD_ARTIFACT_STEM}__*.svg")) == (old_top_svg,)
+    assert tuple(tmp_path.glob(f"{STRIPBOARD_ARTIFACT_STEM}__*.png")) == (old_top_png,)
 
 
 def _assert_latest_artifact_link(latest, artifact):

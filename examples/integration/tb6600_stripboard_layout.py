@@ -21,15 +21,15 @@ _logger = logging.getLogger(__name__)
 
 try:
     from examples.integration.tb6600_stripboard_interface import (
-        create_tb6600_artifact_staging_dir,
         create_schema_for_tb6600_interface,
+        create_tb6600_artifact_staging_dir,
         prepare_tb6600_artifact_outputs_for_run,
         publish_tb6600_staged_artifacts,
     )
 except ModuleNotFoundError:
     from tb6600_stripboard_interface import (
-        create_tb6600_artifact_staging_dir,
         create_schema_for_tb6600_interface,
+        create_tb6600_artifact_staging_dir,
         prepare_tb6600_artifact_outputs_for_run,
         publish_tb6600_staged_artifacts,
     )
@@ -112,9 +112,12 @@ def create_tb6600_verified_stripboard_plan():
     return schema, circuit, layout, report
 
 
-def render_tb6600_stripboard_build(output_dir=None):
+def render_tb6600_stripboard_build(output_dir=None, *, verified_plan=None):
     output_dir = Path(output_dir) if output_dir is not None else DEFAULT_OUTPUT_DIR
-    _schema, circuit, layout, report = create_tb6600_verified_stripboard_plan()
+    if verified_plan is None:
+        _schema, circuit, layout, report = create_tb6600_verified_stripboard_plan()
+    else:
+        _schema, circuit, layout, report = verified_plan
     run_id, staging_dir = create_tb6600_artifact_staging_dir(
         output_dir, STRIPBOARD_ARTIFACT_STEM
     )
