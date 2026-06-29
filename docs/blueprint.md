@@ -414,6 +414,13 @@ Internally, this can reuse the existing SVG/PNG primitives and label placement
 machinery. `render_stripboard_overlay(...)` should continue to work for
 `StripboardNetAssignment`.
 
+Implementation status: this phase is now represented by
+`mege_circuits.physical`, exposed through `mege_circuits.simple`. It provides a
+small footprint library, manual `PhysicalLayout` construction, placed pin
+enumeration, and a top-view stripboard layout renderer. The model is intentionally
+manual and validation-oriented; extraction, opens/shorts verification, and
+routing remain later phases.
+
 ### Phase 3: Extract And Verify The Physical Netlist
 
 Build a conductor graph from the physical layout:
