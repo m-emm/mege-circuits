@@ -454,6 +454,13 @@ This verification layer should know nothing about how the layout was produced.
 It should validate manual layouts, legacy projection adapters where meaningful,
 and future routed layouts.
 
+Implementation status: this phase is now represented by
+`extract_physical_netlist(...)` and `verify_stripboard_layout(...)` in
+`mege_circuits.physical`, exposed through `mege_circuits.simple`. The verifier
+builds the physical conductor graph, reports opens and shorts, and returns
+report-style DRC diagnostics for invalid physical geometry. Debug rendering of
+connected components remains a later renderer-adapter step.
+
 ### Phase 4: Route Onto Stripboard
 
 Only after extraction and verification exist should the project replace the

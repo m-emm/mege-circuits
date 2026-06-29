@@ -11,6 +11,9 @@ import mege_circuits.dsl as dsl
 from mege_circuits.circuit import Circuit, Component
 from mege_circuits.dsl import Direction, Stripboard, StripboardBlocker, StripboardCut
 
+ERROR = "error"
+WARNING = "warning"
+
 
 @dataclass(frozen=True)
 class Footprint:
@@ -109,6 +112,55 @@ class PhysicalLayout:
     blockers: tuple[StripboardBlocker, ...] = ()
     annotations: tuple[str, ...] = ()
     footprints: tuple[Footprint, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class PhysicalConductor:
+    index: int
+    holes: tuple[tuple[int, int], ...]
+    pins: tuple[PlacedPin, ...] = ()
+    net_names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PhysicalNetlist:
+    board: Stripboard
+    conductors: tuple[PhysicalConductor, ...]
+
+
+@dataclass(frozen=True)
+class PhysicalIssue:
+    severity: str
+    code: str
+    message: str
+    subject: str | None = None
+    holes: tuple[tuple[int, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class PhysicalVerificationReport:
+    issues: tuple[PhysicalIssue, ...] = ()
+    physical_netlist: PhysicalNetlist | None = None
+
+    @property
+    def errors(self):
+        return tuple(issue for issue in self.issues if issue.severity == ERROR)
+
+    @property
+    def warnings(self):
+        return tuple(issue for issue in self.issues if issue.severity == WARNING)
+
+    @property
+    def ok(self):
+        return not self.errors
+
+    def summary(self):
+        if not self.issues:
+            return "Physical verification passed with no issues."
+        return "\n".join(
+            f"{issue.severity.upper()} {issue.code}: {issue.message}"
+            for issue in self.issues
+        )
 
 
 def default_footprints():
@@ -229,6 +281,30 @@ def placed_component_pins(layout, circuit):
     return tuple(sorted(pins, key=lambda pin: (pin.refdes, pin.terminal_name)))
 
 
+def extract_physical_netlist(layout, circuit):
+    """Extract physical copper connectivity from a stripboard layout."""
+
+    _validate_physical_inputs(layout, circuit)
+    issues = _physical_layout_drc_issues(layout, circuit)
+    errors = tuple(issue for issue in issues if issue.severity == ERROR)
+    if errors:
+        raise ValueError(_issue_summary(errors))
+    return _extract_physical_netlist_unchecked(layout, circuit)
+
+
+def verify_stripboard_layout(layout, circuit):
+    """Return DRC, open-circuit, and short-circuit diagnostics for a layout."""
+
+    _validate_physical_inputs(layout, circuit)
+    issues = list(_physical_layout_drc_issues(layout, circuit))
+    if any(issue.severity == ERROR for issue in issues):
+        return PhysicalVerificationReport(tuple(issues), physical_netlist=None)
+
+    physical_netlist = _extract_physical_netlist_unchecked(layout, circuit)
+    issues.extend(_physical_connectivity_issues(physical_netlist))
+    return PhysicalVerificationReport(tuple(issues), physical_netlist=physical_netlist)
+
+
 def render_stripboard_layout(layout, circuit, file, scale=32):
     """Render a manual physical stripboard layout as SVG or PNG."""
 
@@ -269,6 +345,528 @@ def footprint_for_component(component, footprints):
             f"Component kind {component.kind!r} has multiple matching footprints: {names}."
         )
     return matches[0]
+
+
+def _validate_physical_inputs(layout, circuit):
+    if not isinstance(layout, PhysicalLayout):
+        raise TypeError("layout must be a PhysicalLayout object.")
+    if not isinstance(circuit, Circuit):
+        raise TypeError("circuit must be a Circuit object.")
+    if not isinstance(layout.board, Stripboard):
+        raise TypeError("layout.board must be a Stripboard object.")
+
+
+def _physical_layout_drc_issues(layout, circuit):
+    issues = []
+    if layout.board.strip_direction is not Direction.HORIZONTAL:
+        issues.append(
+            PhysicalIssue(
+                ERROR,
+                "unsupported_strip_direction",
+                "Only horizontal stripboards are supported for verification.",
+            )
+        )
+
+    footprint_map = _safe_footprints_by_name(layout.footprints, issues)
+    pins, pin_issues, generated_blockers = _layout_pins_and_issues(
+        layout,
+        circuit,
+        footprint_map,
+    )
+    issues.extend(pin_issues)
+
+    cut_holes = _valid_cut_holes(layout, issues)
+    _check_jumpers(layout, circuit, issues)
+    blockers = _valid_blockers(
+        (*layout.blockers, *generated_blockers),
+        layout.board,
+        issues,
+    )
+    _check_pin_hole_collisions(pins, issues)
+    _check_pins_on_cuts(pins, cut_holes, issues)
+    _check_blocker_pin_collisions(blockers, pins, issues)
+    return tuple(issues)
+
+
+def _safe_footprints_by_name(footprints, issues):
+    try:
+        return _footprints_by_name(footprints)
+    except (TypeError, ValueError) as error:
+        issues.append(
+            PhysicalIssue(
+                ERROR,
+                "invalid_footprint_library",
+                str(error),
+            )
+        )
+        return {}
+
+
+def _layout_pins_and_issues(layout, circuit, footprint_map):
+    issues = []
+    pins = []
+    generated_blockers = []
+    components_by_refdes = {
+        component.refdes: component for component in circuit.components
+    }
+    placed_refdeses = set()
+
+    for placed_component in layout.placed_components:
+        if not isinstance(placed_component, PlacedComponent):
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "invalid_placement",
+                    (
+                        "Layout placement is "
+                        f"{type(placed_component).__name__}, not PlacedComponent."
+                    ),
+                )
+            )
+            continue
+
+        if placed_component.refdes in placed_refdeses:
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "duplicate_component_placement",
+                    f"Component {placed_component.refdes!r} is placed more than once.",
+                    subject=placed_component.refdes,
+                )
+            )
+        placed_refdeses.add(placed_component.refdes)
+
+        component = components_by_refdes.get(placed_component.refdes)
+        if component is None:
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "unknown_component_placement",
+                    f"Layout places unknown component {placed_component.refdes!r}.",
+                    subject=placed_component.refdes,
+                )
+            )
+            continue
+
+        footprint = footprint_map.get(placed_component.footprint_name)
+        if footprint is None:
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "unknown_footprint",
+                    (
+                        f"Component {placed_component.refdes!r} uses unknown "
+                        f"footprint {placed_component.footprint_name!r}."
+                    ),
+                    subject=placed_component.refdes,
+                )
+            )
+            continue
+
+        _check_component_footprint_assignment(component, footprint, issues)
+        if placed_component.rotation not in footprint.allowed_rotations:
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "invalid_footprint_rotation",
+                    (
+                        f"Component {placed_component.refdes!r} uses rotation "
+                        f"{placed_component.rotation}, but footprint "
+                        f"{footprint.name!r} allows {footprint.allowed_rotations}."
+                    ),
+                    subject=placed_component.refdes,
+                )
+            )
+
+        for terminal in component.terminals:
+            if terminal.name not in footprint.pins:
+                continue
+            row, col = _absolute_footprint_point(
+                placed_component.origin,
+                placed_component.rotation,
+                footprint.pins[terminal.name],
+            )
+            pin = PlacedPin(
+                refdes=component.refdes,
+                terminal_name=terminal.name,
+                net_name=terminal.net_name,
+                row=row,
+                col=col,
+                footprint_name=footprint.name,
+            )
+            pins.append(pin)
+            if not _hole_on_board(layout.board, row, col):
+                issues.append(
+                    PhysicalIssue(
+                        ERROR,
+                        "component_outside_board",
+                        (
+                            f"Component pin {pin.refdes}.{pin.terminal_name} "
+                            f"at {pin.hole} is outside the board."
+                        ),
+                        subject=pin.refdes,
+                        holes=(pin.hole,),
+                    )
+                )
+
+        pin_holes = {
+            _absolute_footprint_point(
+                placed_component.origin,
+                placed_component.rotation,
+                point,
+            )
+            for point in footprint.pins.values()
+        }
+        for point in footprint.blockers:
+            row, col = _absolute_footprint_point(
+                placed_component.origin,
+                placed_component.rotation,
+                point,
+            )
+            if (row, col) in pin_holes:
+                continue
+            generated_blockers.append(
+                StripboardBlocker(
+                    row=row,
+                    col=col,
+                    element_name=placed_component.refdes,
+                )
+            )
+            if not _hole_on_board(layout.board, row, col):
+                issues.append(
+                    PhysicalIssue(
+                        ERROR,
+                        "component_outside_board",
+                        (
+                            f"Component body blocker for {placed_component.refdes!r} "
+                            f"at {(row, col)} is outside the board."
+                        ),
+                        subject=placed_component.refdes,
+                        holes=((row, col),),
+                    )
+                )
+
+    missing = tuple(sorted(set(components_by_refdes) - placed_refdeses))
+    for refdes in missing:
+        issues.append(
+            PhysicalIssue(
+                ERROR,
+                "missing_component_placement",
+                f"Component {refdes!r} has no physical placement.",
+                subject=refdes,
+            )
+        )
+
+    return tuple(pins), tuple(issues), tuple(generated_blockers)
+
+
+def _check_component_footprint_assignment(component, footprint, issues):
+    if component.kind not in footprint.component_kinds:
+        issues.append(
+            PhysicalIssue(
+                ERROR,
+                "footprint_kind_mismatch",
+                (
+                    f"Footprint {footprint.name!r} does not support component "
+                    f"kind {component.kind!r} for {component.refdes!r}."
+                ),
+                subject=component.refdes,
+            )
+        )
+
+    component_terminals = {terminal.name for terminal in component.terminals}
+    footprint_terminals = set(footprint.pins)
+    for terminal_name in sorted(component_terminals - footprint_terminals):
+        issues.append(
+            PhysicalIssue(
+                ERROR,
+                "unassigned_footprint_terminal",
+                (
+                    f"Component {component.refdes!r} terminal {terminal_name!r} "
+                    f"is not assigned by footprint {footprint.name!r}."
+                ),
+                subject=component.refdes,
+            )
+        )
+    for terminal_name in sorted(footprint_terminals - component_terminals):
+        issues.append(
+            PhysicalIssue(
+                ERROR,
+                "unknown_footprint_terminal",
+                (
+                    f"Footprint {footprint.name!r} assigns unknown terminal "
+                    f"{terminal_name!r} for component {component.refdes!r}."
+                ),
+                subject=component.refdes,
+            )
+        )
+
+
+def _valid_cut_holes(layout, issues):
+    cut_holes = set()
+    for cut in layout.cuts:
+        if not isinstance(cut, StripboardCut):
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "invalid_cut",
+                    f"Layout cut is {type(cut).__name__}, not StripboardCut.",
+                )
+            )
+            continue
+        if not _hole_on_board(layout.board, cut.row, cut.col):
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "cut_outside_board",
+                    f"Cut at {(cut.row, cut.col)} is outside the board.",
+                    holes=((cut.row, cut.col),),
+                )
+            )
+            continue
+        cut_holes.add((cut.row, cut.col))
+    return cut_holes
+
+
+def _check_jumpers(layout, circuit, issues):
+    net_names = {net.name for net in circuit.nets}
+    for jumper in layout.jumpers:
+        if not isinstance(jumper, Jumper):
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "invalid_jumper",
+                    f"Layout jumper is {type(jumper).__name__}, not Jumper.",
+                )
+            )
+            continue
+        if jumper.net_name not in net_names:
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "unknown_jumper_net",
+                    f"Jumper uses unknown net {jumper.net_name!r}.",
+                    subject=jumper.net_name,
+                    holes=(jumper.start, jumper.end),
+                )
+            )
+        for label, hole in (("start", jumper.start), ("end", jumper.end)):
+            if not _hole_on_board(layout.board, *hole):
+                issues.append(
+                    PhysicalIssue(
+                        ERROR,
+                        "jumper_outside_board",
+                        f"Jumper {label} endpoint {hole} is outside the board.",
+                        subject=jumper.net_name,
+                        holes=(hole,),
+                    )
+                )
+
+
+def _valid_blockers(blockers, board, issues):
+    valid = []
+    for blocker in blockers:
+        if not isinstance(blocker, StripboardBlocker):
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "invalid_blocker",
+                    f"Layout blocker is {type(blocker).__name__}, not StripboardBlocker.",
+                )
+            )
+            continue
+        if not _hole_on_board(board, blocker.row, blocker.col):
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "blocker_outside_board",
+                    (
+                        f"Blocker for {blocker.element_name!r} at "
+                        f"{(blocker.row, blocker.col)} is outside the board."
+                    ),
+                    subject=blocker.element_name,
+                    holes=((blocker.row, blocker.col),),
+                )
+            )
+            continue
+        valid.append(blocker)
+    return tuple(valid)
+
+
+def _check_pin_hole_collisions(pins, issues):
+    pins_by_hole = {}
+    for pin in pins:
+        pins_by_hole.setdefault(pin.hole, []).append(pin)
+    for hole, colliding_pins in sorted(pins_by_hole.items()):
+        if len(colliding_pins) < 2:
+            continue
+        pin_names = tuple(
+            f"{pin.refdes}.{pin.terminal_name}"
+            for pin in sorted(
+                colliding_pins,
+                key=lambda item: (item.refdes, item.terminal_name),
+            )
+        )
+        issues.append(
+            PhysicalIssue(
+                ERROR,
+                "pin_hole_collision",
+                f"Multiple component pins share hole {hole}: {pin_names}.",
+                holes=(hole,),
+            )
+        )
+
+
+def _check_pins_on_cuts(pins, cut_holes, issues):
+    for pin in pins:
+        if pin.hole not in cut_holes:
+            continue
+        issues.append(
+            PhysicalIssue(
+                ERROR,
+                "pin_on_cut",
+                f"Component pin {pin.refdes}.{pin.terminal_name} is on cut hole {pin.hole}.",
+                subject=pin.refdes,
+                holes=(pin.hole,),
+            )
+        )
+
+
+def _check_blocker_pin_collisions(blockers, pins, issues):
+    pins_by_hole = {}
+    for pin in pins:
+        pins_by_hole.setdefault(pin.hole, []).append(pin)
+    seen = set()
+    for blocker in blockers:
+        hole = (blocker.row, blocker.col)
+        for pin in pins_by_hole.get(hole, ()):
+            key = (blocker.element_name, pin.refdes, pin.terminal_name, hole)
+            if key in seen:
+                continue
+            seen.add(key)
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "blocker_pin_collision",
+                    (
+                        f"Blocker for {blocker.element_name!r} collides with "
+                        f"pin {pin.refdes}.{pin.terminal_name} at {hole}."
+                    ),
+                    subject=blocker.element_name,
+                    holes=(hole,),
+                )
+            )
+
+
+def _extract_physical_netlist_unchecked(layout, circuit):
+    cut_holes = {(cut.row, cut.col) for cut in layout.cuts}
+    graph = _UnionFind(_board_holes(layout.board))
+
+    for row in range(layout.board.height_pitches):
+        for col in range(layout.board.width_pitches - 1):
+            left = (row, col)
+            right = (row, col + 1)
+            if left in cut_holes or right in cut_holes:
+                continue
+            graph.union(left, right)
+
+    for jumper in layout.jumpers:
+        graph.union(jumper.start, jumper.end)
+
+    pins_by_root = {}
+    for pin in placed_component_pins(layout, circuit):
+        root = graph.find(pin.hole)
+        pins_by_root.setdefault(root, []).append(pin)
+
+    holes_by_root = {}
+    for hole in _board_holes(layout.board):
+        holes_by_root.setdefault(graph.find(hole), []).append(hole)
+
+    conductors = []
+    for index, (_root, holes) in enumerate(
+        sorted(
+            holes_by_root.items(),
+            key=lambda item: (min(item[1]), len(item[1])),
+        )
+    ):
+        sorted_holes = tuple(sorted(holes))
+        pins = tuple(
+            sorted(
+                pins_by_root.get(_root, ()),
+                key=lambda pin: (pin.refdes, pin.terminal_name),
+            )
+        )
+        net_names = tuple(sorted({pin.net_name for pin in pins}))
+        conductors.append(
+            PhysicalConductor(
+                index=index,
+                holes=sorted_holes,
+                pins=pins,
+                net_names=net_names,
+            )
+        )
+    return PhysicalNetlist(
+        board=layout.board,
+        conductors=tuple(conductors),
+    )
+
+
+def _physical_connectivity_issues(physical_netlist):
+    issues = []
+    net_conductors = {}
+    for conductor in physical_netlist.conductors:
+        if len(conductor.net_names) > 1:
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "short_circuit",
+                    (
+                        f"Physical conductor {conductor.index} contains multiple "
+                        f"semantic nets: {conductor.net_names}."
+                    ),
+                    subject=str(conductor.index),
+                    holes=conductor.holes,
+                )
+            )
+        for net_name in conductor.net_names:
+            net_conductors.setdefault(net_name, []).append(conductor)
+
+    for net_name, conductors in sorted(net_conductors.items()):
+        if len(conductors) < 2:
+            continue
+        issues.append(
+            PhysicalIssue(
+                ERROR,
+                "open_circuit",
+                (
+                    f"Semantic net {net_name!r} appears in "
+                    f"{len(conductors)} disconnected physical conductors."
+                ),
+                subject=net_name,
+                holes=tuple(
+                    hole for conductor in conductors for hole in conductor.holes
+                ),
+            )
+        )
+    return tuple(issues)
+
+
+def _board_holes(board):
+    return tuple(
+        (row, col)
+        for row in range(board.height_pitches)
+        for col in range(board.width_pitches)
+    )
+
+
+def _hole_on_board(board, row, col):
+    return 0 <= row < board.height_pitches and 0 <= col < board.width_pitches
+
+
+def _issue_summary(issues):
+    return "\n".join(
+        f"{issue.severity.upper()} {issue.code}: {issue.message}" for issue in issues
+    )
 
 
 def _normalize_placements(placements, components_by_refdes, footprint_map):
@@ -888,3 +1486,22 @@ def _dedupe_blockers(blockers):
             blocker,
         )
     return tuple(blockers_by_key[key] for key in sorted(blockers_by_key))
+
+
+class _UnionFind:
+    def __init__(self, items):
+        self._parents = {item: item for item in items}
+
+    def find(self, item):
+        parent = self._parents[item]
+        if parent != item:
+            parent = self.find(parent)
+            self._parents[item] = parent
+        return parent
+
+    def union(self, left, right):
+        left_root = self.find(left)
+        right_root = self.find(right)
+        if left_root == right_root:
+            return
+        self._parents[right_root] = left_root

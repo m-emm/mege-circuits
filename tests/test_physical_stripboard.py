@@ -9,14 +9,21 @@ from mege_circuits.simple import (
     Footprint,
     Jumper,
     PhysicalLayout,
+    PhysicalNetlist,
+    PhysicalVerificationReport,
+    PlacedComponent,
     PlacedPin,
+    StripboardBlocker,
+    StripboardCut,
     circuit_from_schema,
     create_manual_stripboard_layout,
     create_stripboard,
     default_footprints,
+    extract_physical_netlist,
     footprint_for_component,
     placed_component_pins,
     render_stripboard_layout,
+    verify_stripboard_layout,
 )
 
 
@@ -133,6 +140,168 @@ def test_render_stripboard_layout_writes_svg_and_png(tmp_path):
     assert png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
+def test_extract_physical_netlist_and_verification_pass_for_connected_layout():
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(5, 8),
+        placements={
+            "R1": ((0, 0), 90),
+            "R2": ((4, 2), 90),
+        },
+        jumpers=(((3, 0), (4, 2), "midpoint"),),
+    )
+
+    physical_netlist = extract_physical_netlist(layout, circuit)
+    report = verify_stripboard_layout(layout, circuit)
+
+    assert isinstance(physical_netlist, PhysicalNetlist)
+    assert isinstance(report, PhysicalVerificationReport)
+    assert report.ok
+    assert report.physical_netlist == physical_netlist
+    assert _conductors_by_net(physical_netlist)["midpoint"][0].net_names == (
+        "midpoint",
+    )
+    assert len(_conductors_by_net(physical_netlist)["midpoint"]) == 1
+
+
+def test_extract_physical_netlist_respects_strip_cuts():
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(5, 8),
+        placements={
+            "R1": ((0, 0), 0),
+            "R2": ((4, 2), 90),
+        },
+        cuts=((0, 1),),
+        jumpers=(((0, 3), (4, 2), "midpoint"),),
+    )
+
+    report = verify_stripboard_layout(layout, circuit)
+
+    assert report.ok
+    assert _conductors_by_net(report.physical_netlist)["vcc"][0].net_names == ("vcc",)
+    assert _conductors_by_net(report.physical_netlist)["midpoint"][0].net_names == (
+        "midpoint",
+    )
+
+
+def test_verify_stripboard_layout_reports_open_circuit():
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(5, 8),
+        placements={
+            "R1": ((0, 0), 90),
+            "R2": ((4, 2), 90),
+        },
+    )
+
+    report = verify_stripboard_layout(layout, circuit)
+
+    assert not report.ok
+    assert {issue.code for issue in report.errors} == {"open_circuit"}
+    assert "midpoint" in report.summary()
+
+
+def test_verify_stripboard_layout_reports_short_circuit():
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(5, 8),
+        placements={
+            "R1": ((0, 0), 0),
+            "R2": ((4, 2), 90),
+        },
+    )
+
+    report = verify_stripboard_layout(layout, circuit)
+
+    assert not report.ok
+    assert "short_circuit" in {issue.code for issue in report.errors}
+    assert any(
+        conductor.net_names == ("midpoint", "vcc")
+        for conductor in report.physical_netlist.conductors
+    )
+
+
+def test_verify_stripboard_layout_reports_drc_without_raising():
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+    layout = PhysicalLayout(
+        board=create_stripboard(4, 4),
+        placed_components=(
+            PlacedComponent("R1", "axial_2pin_span3", (0, 2), 0),
+            PlacedComponent("R2", "axial_2pin_span3", (2, 0), 0),
+        ),
+        cuts=(StripboardCut(row=2, col=0),),
+        jumpers=(Jumper(start=(0, 0), end=(9, 9), net_name="ghost"),),
+        blockers=(),
+        footprints=default_footprints(),
+    )
+
+    report = verify_stripboard_layout(layout, circuit)
+
+    assert not report.ok
+    assert report.physical_netlist is None
+    assert {
+        "component_outside_board",
+        "pin_on_cut",
+        "jumper_outside_board",
+        "unknown_jumper_net",
+    }.issubset({issue.code for issue in report.errors})
+    with pytest.raises(ValueError, match="component_outside_board"):
+        extract_physical_netlist(layout, circuit)
+
+
+def test_verify_stripboard_layout_reports_pin_and_blocker_collisions():
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+    layout = PhysicalLayout(
+        board=create_stripboard(8, 4),
+        placed_components=(
+            PlacedComponent("R1", "axial_2pin_span3", (0, 0), 0),
+            PlacedComponent("R2", "axial_2pin_span3", (0, 0), 0),
+        ),
+        cuts=(),
+        jumpers=(),
+        blockers=(StripboardBlocker(row=0, col=0, element_name="fixture"),),
+        footprints=default_footprints(),
+    )
+
+    report = verify_stripboard_layout(layout, circuit)
+
+    assert not report.ok
+    assert {
+        "pin_hole_collision",
+        "blocker_pin_collision",
+    }.issubset({issue.code for issue in report.errors})
+
+
+def test_verify_stripboard_layout_reports_unassigned_footprint_terminal():
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+    bad_footprint = Footprint(
+        name="bad_resistor",
+        component_kinds=("resistor",),
+        pins={"start": (0, 0)},
+    )
+    layout = PhysicalLayout(
+        board=create_stripboard(8, 4),
+        placed_components=(
+            PlacedComponent("R1", "bad_resistor", (0, 0), 0),
+            PlacedComponent("R2", "bad_resistor", (2, 0), 0),
+        ),
+        cuts=(),
+        jumpers=(),
+        blockers=(),
+        footprints=(bad_footprint,),
+    )
+
+    report = verify_stripboard_layout(layout, circuit)
+
+    assert not report.ok
+    assert {issue.code for issue in report.errors} == {"unassigned_footprint_terminal"}
+
+
 def test_manual_layout_rejects_component_pins_outside_board():
     circuit = circuit_from_schema(create_voltage_divider())
 
@@ -145,6 +314,14 @@ def test_manual_layout_rejects_component_pins_outside_board():
                 "R2": ((2, 0), 0),
             },
         )
+
+
+def _conductors_by_net(physical_netlist):
+    conductors_by_net = {}
+    for conductor in physical_netlist.conductors:
+        for net_name in conductor.net_names:
+            conductors_by_net.setdefault(net_name, []).append(conductor)
+    return conductors_by_net
 
 
 def test_manual_layout_rejects_cut_on_component_pin():

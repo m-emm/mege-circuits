@@ -56,14 +56,20 @@ from mege_circuits.dsl import (
 from mege_circuits.physical import (
     Footprint,
     Jumper,
+    PhysicalConductor,
+    PhysicalIssue,
     PhysicalLayout,
+    PhysicalNetlist,
+    PhysicalVerificationReport,
     PlacedComponent,
     PlacedPin,
     create_manual_stripboard_layout,
     default_footprints,
+    extract_physical_netlist,
     footprint_for_component,
     placed_component_pins,
     render_stripboard_layout,
+    verify_stripboard_layout,
 )
 
 __all__ = [
@@ -81,7 +87,11 @@ __all__ = [
     "Ground",
     "Jumper",
     "PMos",
+    "PhysicalConductor",
+    "PhysicalIssue",
     "PhysicalLayout",
+    "PhysicalNetlist",
+    "PhysicalVerificationReport",
     "PlacedComponent",
     "PlacedPin",
     "Resistor",
@@ -112,6 +122,7 @@ __all__ = [
     "create_stripboard",
     "create_wire",
     "default_footprints",
+    "extract_physical_netlist",
     "export_netlist",
     "footprint_for_component",
     "get_schema_net_visualizations",
@@ -126,4 +137,5 @@ __all__ = [
     "rotate",
     "snap_schema_to_stripboard",
     "translate",
+    "verify_stripboard_layout",
 ]
