@@ -1,12 +1,56 @@
-__pycache__/
+# Temporary and binary files
+*~
 *.py[cod]
+*.so
+*.orig
+*.log
+__pycache__/
+.cache/
+.*.swp
+.DS_Store
+*/.ipynb_checkpoints/
+
+# Project files
+.ropeproject
+.project
+.pydevproject
+.settings/
+.idea/
+.vscode/
+tags
+*.code-workspace
+
+# Package files
+*.egg
+*.eggs/
 *.egg-info/
-.pytest_cache/
+.installed.cfg
+
+# Testing and coverage
 .coverage
+.coverage.*
+.tox/
+junit*.xml
+coverage.xml
+.pytest_cache/
 htmlcov/
+
+# Build outputs
 build/
 dist/
+sdist/
+cover/
+MANIFEST
+
+# Per-project virtualenvs and local tooling
 .venv/
+.venv*/
+.conda*/
+.python-version
+.Python
+env/
+venv/
+.env
 .mypy_cache/
 
 # Example render outputs are reproducible.
