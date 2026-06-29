@@ -1,10 +1,13 @@
 """Render the planned Pico-to-TB6600 stripboard interface schematic."""
 
+import logging
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
 from mege_circuits.simple import *
+
+_logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_DIR = Path(__file__).with_name("diagrams")
 SCHEMATIC_ARTIFACT_STEM = "pico_tb6600_stripboard_interface"
@@ -572,7 +575,7 @@ def publish_tb6600_latest_artifact_links(*artifacts):
             latest.symlink_to(artifact.name)
         except OSError:
             shutil.copyfile(artifact, latest)
-        print(f"Updated {latest} -> {artifact.name}")
+        _logger.info("Updated %s -> %s", latest, artifact.name)
 
 
 def render_tb6600_schematic(output_dir=None):
@@ -584,7 +587,7 @@ def render_tb6600_schematic(output_dir=None):
     schema = create_schema_for_tb6600_interface()
     for output_file in (svg_file, png_file):
         render_schemdraw(schema, file=output_file)
-        print(f"Wrote {output_file}")
+        _logger.info("Wrote %s", output_file)
     publish_tb6600_latest_artifact_links(svg_file, png_file)
     return svg_file, png_file
 

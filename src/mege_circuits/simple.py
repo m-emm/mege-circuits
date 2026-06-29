@@ -1,5 +1,34 @@
 """Compact import surface for schematic and diagnostic stripboard scripts."""
 
+LOGGING_FORMAT = "%(asctime)s - %(name)-60s - %(levelname)-8s - %(message)s"
+
+
+def _setup_logging():
+    import os
+    import sys
+
+    def is_running_under_pytest():
+        return bool(os.getenv("PYTEST_VERSION")) or "pytest" in sys.modules
+
+    if (
+        os.environ.get("MEGE_CIRCUITS_NO_LOGGING_INIT", False)
+        or is_running_under_pytest()
+    ):
+        return
+
+    import logging
+
+    level = os.environ.get("MEGE_CIRCUITS_LOG_LEVEL", "INFO")
+    logging.basicConfig(level=level, format=LOGGING_FORMAT, force=True)
+    logging.getLogger().handlers[0].stream = sys.stdout
+    package_level = logging.getLevelName(str(level).upper())
+    if not isinstance(package_level, int):
+        package_level = logging.INFO
+    logging.getLogger("mege_circuits").setLevel(package_level)
+
+
+_setup_logging()
+
 from mege_circuits.circuit import (
     Circuit,
     Component,
@@ -97,6 +126,7 @@ __all__ = [
     "Fuse",
     "Ground",
     "Jumper",
+    "LOGGING_FORMAT",
     "PMos",
     "PhysicalConductor",
     "PhysicalIssue",

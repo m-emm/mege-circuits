@@ -1,8 +1,11 @@
 """Render a minimal stacked voltage divider schematic."""
 
+import logging
 from pathlib import Path
 
 from mege_circuits.simple import *
+
+_logger = logging.getLogger(__name__)
 
 
 def create_voltage_divider():
@@ -33,7 +36,7 @@ def main():
     schema = create_voltage_divider()
     outfile = Path(__file__).with_name("voltage_divider.svg")
     render_schemdraw(schema, file=outfile)
-    print(f"Wrote {outfile}")
+    _logger.info("Wrote %s", outfile)
 
 
 if __name__ == "__main__":

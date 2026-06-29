@@ -1,4 +1,5 @@
 import json
+import logging
 
 import pytest
 
@@ -610,6 +611,24 @@ def test_plan_stripboard_routes_voltage_divider_with_verified_layout():
     assert layout.cuts == ()
 
 
+def test_plan_stripboard_logs_progress(caplog):
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+
+    with caplog.at_level(logging.INFO, logger="mege_circuits.physical"):
+        layout, report = plan_stripboard(
+            circuit,
+            board=create_stripboard(5, 5),
+        )
+
+    assert report.ok, report.summary()
+    assert layout is not None
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Planning stripboard layout circuit=manual_divider" in messages
+    assert "Placed component 1/2 refdes=R1" in messages
+    assert "Finished component placement states=" in messages
+    assert "Finished stripboard planning circuit=manual_divider" in messages
+
+
 def test_plan_stripboard_uses_projection_hints_from_schema():
     schema = create_voltage_divider()
     circuit = circuit_from_schema(schema, name="manual_divider")
@@ -660,6 +679,22 @@ def test_plan_stripboard_routes_high_side_switch_with_jumpers_and_cuts():
     } == {net.name for net in circuit.nets}
 
 
+def test_plan_stripboard_logs_jumper_endpoint_selection(caplog):
+    circuit = circuit_from_schema(create_high_side_switch(), name="high_side_switch")
+
+    with caplog.at_level(logging.DEBUG, logger="mege_circuits.physical"):
+        layout, report = plan_stripboard(
+            circuit,
+            board=create_stripboard(16, 20),
+        )
+
+    assert report.ok, report.summary()
+    assert layout.jumpers
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Routing connectivity jumpers" in messages
+    assert "Selected jumper endpoints net=" in messages
+
+
 def test_render_stripboard_layout_labels_only_directional_terminals(tmp_path):
     circuit = circuit_from_schema(create_high_side_switch(), name="high_side_switch")
     layout, report = plan_stripboard(
@@ -696,6 +731,22 @@ def test_plan_stripboard_reports_failure_for_too_small_board():
     assert not report.ok
     assert report.errors[0].code == "routing_failed"
     assert "No legal placement candidates" in report.summary()
+
+
+def test_plan_stripboard_logs_failure_for_too_small_board(caplog):
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+
+    with caplog.at_level(logging.INFO, logger="mege_circuits.physical"):
+        layout, report = plan_stripboard(
+            circuit,
+            board=create_stripboard(1, 1),
+        )
+
+    assert layout is None
+    assert not report.ok
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "No legal placement candidates refdes=R1" in messages
+    assert "Stripboard planning failed circuit=manual_divider" in messages
 
 
 def test_write_stripboard_build_outputs_writes_build_artifacts(tmp_path):
@@ -803,8 +854,9 @@ def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(tmp_path):
     )
 
 
-def test_tb6600_build_outputs_include_only_verified_artifacts(tmp_path):
-    outputs = render_tb6600_stripboard_build(tmp_path)
+def test_tb6600_build_outputs_include_only_verified_artifacts(tmp_path, caplog):
+    with caplog.at_level(logging.INFO):
+        outputs = render_tb6600_stripboard_build(tmp_path)
 
     assert all(path.exists() for path in outputs.as_tuple())
     assert (
@@ -836,6 +888,13 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(tmp_path):
         for connector in data["layout"]["connectors"]
     )
     assert not tuple(tmp_path.glob("*projection*"))
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert (
+        "Writing stripboard build outputs circuit=pico_tb6600_stripboard_interface"
+        in messages
+    )
+    assert "Wrote stripboard build artifact" in messages
+    assert "verification_ok=True" in messages
 
 
 def test_verify_stripboard_layout_reports_open_circuit():

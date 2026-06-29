@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -11,6 +12,8 @@ from typing import Mapping
 import mege_circuits.dsl as dsl
 from mege_circuits.circuit import Circuit, Component, export_netlist
 from mege_circuits.dsl import Direction, Stripboard, StripboardBlocker, StripboardCut
+
+_logger = logging.getLogger(__name__)
 
 ERROR = "error"
 WARNING = "warning"
@@ -546,11 +549,24 @@ def stripboard_hints_from_schema(
     if not isinstance(compact, bool):
         raise TypeError("compact must be a bool.")
 
+    priority_element_names = tuple(str(name) for name in priority_element_names)
+    _logger.info(
+        "Deriving stripboard routing hints compact=%s priority=%s elements=%s nodes=%s",
+        compact,
+        priority_element_names,
+        len(schema.elements),
+        len(schema.node_views),
+    )
     assignment = dsl.assign_schema_nets_to_stripboard(schema)
     if compact:
         try:
             assignment = dsl.compact_sparse_stripboard_rows(assignment, schema=schema)
-        except ValueError:
+        except ValueError as error:
+            _logger.warning(
+                "Sparse stripboard row compaction failed; continuing with "
+                "uncompacted rows: %s",
+                error,
+            )
             pass
         assignment = dsl.compact_stripboard_connections_left(
             schema,
@@ -617,7 +633,7 @@ def stripboard_hints_from_schema(
             key=lambda item: (item[1], item[0]),
         )
     )
-    return StripboardRoutingHints(
+    hints = StripboardRoutingHints(
         net_rows=assignment.net_rows,
         component_columns=component_columns,
         component_terminal_holes=component_terminal_holes,
@@ -628,6 +644,26 @@ def stripboard_hints_from_schema(
         board_width_pitches=assignment.stripboard.width_pitches,
         board_height_pitches=assignment.stripboard.height_pitches,
     )
+    _logger.info(
+        "Derived stripboard routing hints board=%sx%s nets=%s components=%s "
+        "connectors=%s terminal_holes=%s",
+        hints.board_width_pitches,
+        hints.board_height_pitches,
+        len(hints.net_rows),
+        len(hints.component_columns),
+        len(hints.connector_holes),
+        len(hints.component_terminal_holes),
+    )
+    _logger.debug(
+        "Stripboard hint details net_rows=%s component_columns=%s "
+        "connector_holes=%s terminal_holes=%s component_order=%s",
+        dict(hints.net_rows),
+        dict(hints.component_columns),
+        dict(hints.connector_holes),
+        dict(hints.component_terminal_holes),
+        hints.component_order,
+    )
+    return hints
 
 
 def plan_stripboard(
@@ -647,12 +683,32 @@ def plan_stripboard(
     if not isinstance(board, Stripboard):
         raise TypeError("board must be a Stripboard object.")
     if board.strip_direction is not Direction.HORIZONTAL:
+        _logger.error(
+            "Cannot plan stripboard circuit=%s board=%sx%s: unsupported strip "
+            "direction %s",
+            _circuit_log_name(circuit),
+            board.width_pitches,
+            board.height_pitches,
+            board.strip_direction,
+        )
         return None, _routing_failure_report(
             "Only horizontal stripboards are supported by the first router.",
             code="unsupported_strip_direction",
         )
     routing_hints = _coerce_routing_hints(hints)
 
+    _logger.info(
+        "Planning stripboard layout circuit=%s board=%sx%s components=%s nets=%s "
+        "fixed_placements=%s fixed_cuts=%s fixed_jumpers=%s",
+        _circuit_log_name(circuit),
+        board.width_pitches,
+        board.height_pitches,
+        len(circuit.components),
+        len(circuit.nets),
+        len(fixed_placements or {}),
+        len(fixed_cuts),
+        len(fixed_jumpers),
+    )
     try:
         footprint_map = _footprints_by_name(
             default_footprints() if footprints is None else footprints
@@ -670,9 +726,27 @@ def plan_stripboard(
             board,
         )
     except (TypeError, ValueError) as error:
+        _logger.error("Stripboard planning input normalization failed: %s", error)
         return None, _routing_failure_report(str(error))
 
     net_rows = _routing_net_rows(circuit, routing_hints)
+    _logger.info(
+        "Prepared stripboard routing inputs footprints=%s connectors=%s net_rows=%s "
+        "shake_limit=%s",
+        len(footprint_map),
+        len(routing_connectors),
+        len(net_rows),
+        _routing_shake_order_limit(),
+    )
+    _logger.debug(
+        "Routing inputs net_rows=%s connectors=%s fixed_placements=%s "
+        "fixed_cuts=%s fixed_jumpers=%s",
+        dict(net_rows),
+        routing_connectors,
+        fixed_placement_map,
+        normalized_fixed_cuts,
+        normalized_fixed_jumpers,
+    )
     best_layout = None
     best_report = None
     best_score = None
@@ -680,12 +754,20 @@ def plan_stripboard(
     pending_orders = [_routing_component_order(circuit, routing_hints)]
     seen_orders = set()
     queued_orders = set(pending_orders)
+    attempt_index = 0
     while pending_orders and len(seen_orders) < _routing_shake_order_limit():
         component_order = pending_orders.pop(0)
         queued_orders.discard(component_order)
         if component_order in seen_orders:
             continue
         seen_orders.add(component_order)
+        attempt_index += 1
+        _logger.info(
+            "Routing placement order %s/%s components=%s",
+            attempt_index,
+            _routing_shake_order_limit(),
+            component_order,
+        )
         order_hints = replace(routing_hints, component_order=component_order)
         planned_states, placement_error = _route_component_placements(
             circuit,
@@ -698,11 +780,30 @@ def plan_stripboard(
         )
         if placement_error is not None:
             last_routing_error = placement_error
+            _logger.warning(
+                "Placement order failed components=%s: %s",
+                component_order,
+                placement_error,
+            )
             continue
 
+        _logger.info(
+            "Placement order produced %s candidate state(s) components=%s",
+            len(planned_states),
+            component_order,
+        )
         run_best_layout = None
         run_best_score = None
+        cut_failures = 0
+        manual_failures = 0
+        jumper_failures = 0
+        verified_candidates = 0
         for planned, placement_score in planned_states:
+            _logger.debug(
+                "Evaluating placement candidate placement_score=%s placements=%s",
+                placement_score,
+                planned,
+            )
             generated_cuts, cut_error = _routing_conflict_cuts(
                 circuit,
                 planned,
@@ -711,6 +812,8 @@ def plan_stripboard(
                 routing_connectors,
             )
             if cut_error is not None:
+                cut_failures += 1
+                _logger.debug("Cut routing rejected candidate: %s", cut_error)
                 continue
 
             try:
@@ -725,7 +828,12 @@ def plan_stripboard(
                     jumpers=_dedupe_jumpers(normalized_fixed_jumpers),
                     connectors=routing_connectors,
                 )
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as error:
+                manual_failures += 1
+                _logger.debug(
+                    "Manual layout rebuild rejected candidate before jumpers: %s",
+                    error,
+                )
                 continue
 
             base_report = verify_stripboard_layout(base_layout, circuit)
@@ -741,6 +849,8 @@ def plan_stripboard(
                     )
                 except ValueError as error:
                     last_routing_error = str(error)
+                    jumper_failures += 1
+                    _logger.debug("Connectivity jumper routing failed: %s", error)
                     continue
                 try:
                     layout = create_manual_stripboard_layout(
@@ -756,11 +866,17 @@ def plan_stripboard(
                         ),
                         connectors=routing_connectors,
                     )
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as error:
+                    manual_failures += 1
+                    _logger.debug(
+                        "Manual layout rebuild rejected candidate after jumpers: %s",
+                        error,
+                    )
                     continue
                 report = verify_stripboard_layout(layout, circuit)
 
             if report.ok:
+                verified_candidates += 1
                 layout, report = _left_compact_stripboard_layout(
                     layout,
                     circuit,
@@ -772,14 +888,31 @@ def plan_stripboard(
                 best_layout = layout
                 best_report = report
                 best_score = score
+                _logger.info(
+                    "New best stripboard candidate ok=%s %s errors=%s score=%s",
+                    report.ok,
+                    _layout_log_summary(layout),
+                    len(report.errors),
+                    score,
+                )
             if report.ok and (run_best_score is None or score < run_best_score):
                 run_best_layout = layout
                 run_best_score = score
 
+        _logger.info(
+            "Finished placement order components=%s verified=%s cut_failures=%s "
+            "jumper_failures=%s rebuild_failures=%s",
+            component_order,
+            verified_candidates,
+            cut_failures,
+            jumper_failures,
+            manual_failures,
+        )
         if run_best_layout is None:
             continue
         if len(run_best_layout.jumpers) <= _routing_shake_jumper_threshold():
             continue
+        queued_count = 0
         for order in _routing_shake_orders_from_layout(
             circuit,
             routing_hints,
@@ -789,9 +922,32 @@ def plan_stripboard(
                 continue
             pending_orders.append(order)
             queued_orders.add(order)
+            queued_count += 1
+        if queued_count:
+            _logger.info(
+                "Queued %s bridge-focused routing restart(s) from jumper nets=%s",
+                queued_count,
+                tuple(
+                    dict.fromkeys(jumper.net_name for jumper in run_best_layout.jumpers)
+                ),
+            )
 
     if best_layout is not None:
+        _logger.info(
+            "Finished stripboard planning circuit=%s ok=%s %s errors=%s score=%s",
+            _circuit_log_name(circuit),
+            best_report.ok,
+            _layout_log_summary(best_layout),
+            len(best_report.errors),
+            best_score,
+        )
         return best_layout, best_report
+    _logger.error(
+        "Stripboard planning failed circuit=%s: %s",
+        _circuit_log_name(circuit),
+        last_routing_error
+        or "No verified stripboard routing candidate could be built.",
+    )
     return None, _routing_failure_report(
         last_routing_error or "No verified stripboard routing candidate could be built."
     )
@@ -813,6 +969,19 @@ def score_stripboard_layout(layout, circuit, report=None):
     )
 
 
+def _circuit_log_name(circuit):
+    return getattr(circuit, "name", None) or "<unnamed>"
+
+
+def _layout_log_summary(layout):
+    return (
+        f"board={layout.board.width_pitches}x{layout.board.height_pitches} "
+        f"components={len(layout.placed_components)} "
+        f"connectors={len(layout.connectors)} cuts={len(layout.cuts)} "
+        f"jumpers={len(layout.jumpers)}"
+    )
+
+
 def _left_compact_stripboard_layout(
     layout,
     circuit,
@@ -822,6 +991,10 @@ def _left_compact_stripboard_layout(
 ):
     report = verify_stripboard_layout(layout, circuit)
     if not report.ok:
+        _logger.warning(
+            "Skipping left compaction because layout is not verified: %s",
+            report.summary(),
+        )
         return layout, report
 
     locked_refdeses = frozenset(str(refdes) for refdes in locked_refdeses)
@@ -833,7 +1006,18 @@ def _left_compact_stripboard_layout(
         _left_compaction_unit_count(compacted) * compacted.board.width_pitches * 2 + 1,
     )
 
-    for _ in range(max_iterations):
+    _logger.debug(
+        "Starting left compaction %s units=%s locked_refdeses=%s score=%s "
+        "max_iterations=%s",
+        _layout_log_summary(compacted),
+        _left_compaction_unit_count(compacted),
+        tuple(sorted(locked_refdeses)),
+        compacted_score,
+        max_iterations,
+    )
+    accepted_count = 0
+    iteration = 0
+    for iteration in range(max_iterations):
         accepted = None
         for unit in _left_compaction_units(compacted, locked_refdeses):
             accepted = _left_compaction_best_move(
@@ -847,13 +1031,29 @@ def _left_compact_stripboard_layout(
         if accepted is None:
             break
         compacted, compacted_report, compacted_score = accepted
+        accepted_count += 1
 
-    return _trim_left_compacted_layout(
+    if accepted_count and iteration + 1 >= max_iterations:
+        _logger.debug(
+            "Left compaction reached iteration guard accepted_moves=%s "
+            "max_iterations=%s",
+            accepted_count,
+            max_iterations,
+        )
+
+    compacted, compacted_report = _trim_left_compacted_layout(
         compacted,
         circuit,
         compacted_report,
         trim_margin=trim_margin,
     )
+    _logger.debug(
+        "Finished left compaction accepted_moves=%s %s score=%s",
+        accepted_count,
+        _layout_log_summary(compacted),
+        _left_compaction_score(compacted),
+    )
+    return compacted, compacted_report
 
 
 def _left_compaction_unit_count(layout):
@@ -980,6 +1180,13 @@ def _left_compaction_best_component_move(layout, circuit, refdes, current_score)
             placed_components=candidate_components,
         )
         if accepted is not None:
+            _logger.debug(
+                "Left compaction moved component refdes=%s origin=%s->%s score=%s",
+                refdes,
+                placed_component.origin,
+                moved.origin,
+                accepted[2],
+            )
             return accepted
     return None
 
@@ -1008,6 +1215,13 @@ def _left_compaction_best_connector_move(layout, circuit, name, current_score):
             connectors=candidate_connectors,
         )
         if accepted is not None:
+            _logger.debug(
+                "Left compaction moved connector name=%s hole=%s->%s score=%s",
+                name,
+                connector.hole,
+                moved.hole,
+                accepted[2],
+            )
             return accepted
     return None
 
@@ -1034,6 +1248,13 @@ def _left_compaction_best_cut_move(layout, circuit, cut_key, current_score):
             cuts=candidate_cuts,
         )
         if accepted is not None:
+            _logger.debug(
+                "Left compaction moved cut row=%s col=%s->%s score=%s",
+                row,
+                col,
+                candidate_col,
+                accepted[2],
+            )
             return accepted
     return None
 
@@ -1082,6 +1303,16 @@ def _left_compaction_best_jumper_endpoint_move(
             jumpers=candidate_jumpers,
         )
         if accepted is not None:
+            _logger.debug(
+                "Left compaction moved jumper endpoint net=%s index=%s endpoint=%s "
+                "hole=%s->%s score=%s",
+                jumper.net_name,
+                jumper_index,
+                endpoint_name,
+                hole,
+                candidate_hole,
+                accepted[2],
+            )
             return accepted
     return None
 
@@ -1141,7 +1372,8 @@ def _rebuild_planned_stripboard_layout(
             connectors=connectors,
             annotations=layout.annotations,
         )
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as error:
+        _logger.debug("Rejected invalid compaction candidate: %s", error)
         return None, _routing_failure_report("Compaction candidate is invalid.")
     return candidate, verify_stripboard_layout(candidate, circuit)
 
@@ -1153,8 +1385,19 @@ def _trim_left_compacted_layout(layout, circuit, report, *, trim_margin):
         max(1, _layout_used_width(layout) + margin),
     )
     if target_width == layout.board.width_pitches:
+        _logger.debug(
+            "Left compaction trim skipped width=%s target_width=%s",
+            layout.board.width_pitches,
+            target_width,
+        )
         return layout, report
 
+    _logger.debug(
+        "Trying left compaction trim width=%s->%s margin=%s",
+        layout.board.width_pitches,
+        target_width,
+        margin,
+    )
     board = Stripboard(
         width_pitches=target_width,
         height_pitches=layout.board.height_pitches,
@@ -1171,7 +1414,17 @@ def _trim_left_compacted_layout(layout, circuit, report, *, trim_margin):
         connectors=layout.connectors,
     )
     if candidate is None or not candidate_report.ok:
+        _logger.debug(
+            "Left compaction trim rejected width=%s->%s",
+            layout.board.width_pitches,
+            target_width,
+        )
         return layout, report
+    _logger.debug(
+        "Left compaction trimmed board width=%s->%s",
+        layout.board.width_pitches,
+        target_width,
+    )
     return candidate, candidate_report
 
 
@@ -1317,12 +1570,26 @@ def write_stripboard_build_outputs(
     if not isinstance(report, PhysicalVerificationReport):
         raise TypeError("report must be a PhysicalVerificationReport.")
     if not report.ok:
+        _logger.error(
+            "Refusing to write stripboard build outputs circuit=%s: %s",
+            _circuit_log_name(circuit),
+            report.summary(),
+        )
         raise ValueError(report.summary())
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = _build_output_paths(output_dir, stem, run_id)
 
+    _logger.info(
+        "Writing stripboard build outputs circuit=%s stem=%s output_dir=%s %s "
+        "verification_ok=%s",
+        _circuit_log_name(circuit),
+        stem,
+        output_dir,
+        _layout_log_summary(layout),
+        report.ok,
+    )
     render_stripboard_layout(layout, circuit, file=paths.top_svg, scale=scale)
     render_stripboard_layout(layout, circuit, file=paths.top_png, scale=scale)
     render_stripboard_bottom(layout, circuit, file=paths.bottom_svg, scale=scale)
@@ -1343,6 +1610,8 @@ def write_stripboard_build_outputs(
     )
     write_stripboard_build_checklist(layout, circuit, report, file=paths.checklist_md)
     write_stripboard_build_json(layout, circuit, report, file=paths.data_json)
+    for artifact in paths.as_tuple():
+        _logger.info("Wrote stripboard build artifact %s", artifact)
     return paths
 
 
@@ -1351,6 +1620,12 @@ def render_stripboard_bottom(layout, circuit, file, scale=32):
 
     _validate_renderable_layout(layout, circuit)
     path = Path(file)
+    _logger.debug(
+        "Rendering stripboard bottom file=%s scale=%s %s",
+        path,
+        scale,
+        _layout_log_summary(layout),
+    )
     suffix = path.suffix.lower()
     if suffix == ".svg":
         _render_stripboard_bottom_svg(layout, circuit, path, scale)
@@ -1358,6 +1633,7 @@ def render_stripboard_bottom(layout, circuit, file, scale=32):
         _render_stripboard_bottom_png(layout, circuit, path, scale)
     else:
         raise ValueError("Stripboard bottom output file must end in .svg or .png.")
+    _logger.debug("Rendered stripboard bottom file=%s", path)
 
 
 def render_stripboard_debug(layout, circuit, report, file, scale=32):
@@ -1370,6 +1646,13 @@ def render_stripboard_debug(layout, circuit, report, file, scale=32):
         raise ValueError("Debug rendering requires a physical netlist in the report.")
 
     path = Path(file)
+    _logger.debug(
+        "Rendering stripboard debug file=%s scale=%s %s conductors=%s",
+        path,
+        scale,
+        _layout_log_summary(layout),
+        len(report.physical_netlist.conductors),
+    )
     suffix = path.suffix.lower()
     if suffix == ".svg":
         _render_stripboard_debug_svg(layout, circuit, report, path, scale)
@@ -1377,6 +1660,7 @@ def render_stripboard_debug(layout, circuit, report, file, scale=32):
         _render_stripboard_debug_png(layout, circuit, report, path, scale)
     else:
         raise ValueError("Stripboard debug output file must end in .svg or .png.")
+    _logger.debug("Rendered stripboard debug file=%s", path)
 
 
 def write_stripboard_build_checklist(layout, circuit, report, file):
@@ -1384,8 +1668,10 @@ def write_stripboard_build_checklist(layout, circuit, report, file):
 
     if not isinstance(report, PhysicalVerificationReport):
         raise TypeError("report must be a PhysicalVerificationReport.")
+    _logger.debug("Writing stripboard build checklist file=%s", file)
     lines = _stripboard_build_checklist_lines(layout, circuit, report)
     Path(file).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _logger.debug("Wrote stripboard build checklist file=%s lines=%s", file, len(lines))
 
 
 def write_stripboard_build_json(layout, circuit, report, file):
@@ -1393,6 +1679,7 @@ def write_stripboard_build_json(layout, circuit, report, file):
 
     if not isinstance(report, PhysicalVerificationReport):
         raise TypeError("report must be a PhysicalVerificationReport.")
+    _logger.debug("Writing stripboard build JSON file=%s", file)
     Path(file).write_text(
         json.dumps(
             _stripboard_build_json_data(layout, circuit, report),
@@ -1402,6 +1689,7 @@ def write_stripboard_build_json(layout, circuit, report, file):
         + "\n",
         encoding="utf-8",
     )
+    _logger.debug("Wrote stripboard build JSON file=%s", file)
 
 
 def render_stripboard_layout(layout, circuit, file, scale=32, *, detail="assembly"):
@@ -1418,6 +1706,13 @@ def render_stripboard_layout(layout, circuit, file, scale=32, *, detail="assembl
     _validate_layout_geometry(layout, circuit, _footprints_by_name(layout.footprints))
 
     path = Path(file)
+    _logger.debug(
+        "Rendering stripboard layout file=%s detail=%s scale=%s %s",
+        path,
+        detail,
+        scale,
+        _layout_log_summary(layout),
+    )
     suffix = path.suffix.lower()
     if suffix == ".svg":
         _render_stripboard_layout_svg(layout, circuit, path, scale, detail)
@@ -1425,6 +1720,7 @@ def render_stripboard_layout(layout, circuit, file, scale=32, *, detail="assembl
         _render_stripboard_layout_png(layout, circuit, path, scale, detail)
     else:
         raise ValueError("Stripboard layout output file must end in .svg or .png.")
+    _logger.debug("Rendered stripboard layout file=%s", path)
 
 
 def _validate_renderable_layout(layout, circuit):
@@ -2120,6 +2416,19 @@ def _route_component_placements(
         net_rows,
         preferred_columns,
     )
+    _logger.info(
+        "Placing components order=%s beam_width=%s candidate_limit=%s "
+        "reserved_holes=%s",
+        ordered_refdeses,
+        _routing_beam_width(),
+        _routing_candidate_limit(),
+        len(reserved_holes),
+    )
+    _logger.debug(
+        "Placement targets preferred_columns=%s terminal_targets=%s",
+        preferred_columns,
+        terminal_targets,
+    )
     initial_state, initial_error = _routing_initial_placement_state(
         fixed_placements,
         components_by_refdes,
@@ -2128,13 +2437,28 @@ def _route_component_placements(
         reserved_holes,
     )
     if initial_error is not None:
+        _logger.error("Initial fixed placement state is invalid: %s", initial_error)
         return None, initial_error
     states = (initial_state,)
 
-    for refdes in ordered_refdeses:
+    total_refdeses = len(ordered_refdeses)
+    for refdes_index, refdes in enumerate(ordered_refdeses, start=1):
         if refdes in fixed_placements:
+            _logger.info(
+                "Placed component %s/%s refdes=%s fixed=True states=%s",
+                refdes_index,
+                total_refdeses,
+                refdes,
+                len(states),
+            )
             continue
         component = components_by_refdes[refdes]
+        _logger.debug(
+            "Finding placement candidates refdes=%s kind=%s preferred_col=%s",
+            refdes,
+            component.kind,
+            preferred_columns.get(refdes, 0),
+        )
         candidates, candidate_error = _routing_component_candidates(
             component,
             board,
@@ -2143,7 +2467,17 @@ def _route_component_placements(
             preferred_columns.get(refdes, 0),
         )
         if candidate_error is not None:
+            _logger.warning(
+                "Placement candidate search failed refdes=%s: %s",
+                refdes,
+                candidate_error,
+            )
             return None, candidate_error
+        _logger.debug(
+            "Found placement candidates refdes=%s candidates=%s",
+            refdes,
+            len(candidates),
+        )
         next_states = []
         for state_score, state_planned, state_pins, state_blockers in states:
             for (
@@ -2169,12 +2503,28 @@ def _route_component_placements(
                     )
                 )
         if not next_states:
+            _logger.warning(
+                "No collision-free placement survived refdes=%s states=%s "
+                "candidates=%s",
+                refdes,
+                len(states),
+                len(candidates),
+            )
             return None, (
                 f"No collision-free placement is available for {refdes!r} "
                 f"on a {board.width_pitches}x{board.height_pitches} board."
             )
         states = tuple(
             sorted(next_states, key=lambda state: state[0])[: _routing_beam_width()]
+        )
+        _logger.info(
+            "Placed component %s/%s refdes=%s candidates=%s states=%s best_score=%s",
+            refdes_index,
+            total_refdeses,
+            refdes,
+            len(candidates),
+            len(states),
+            states[0][0] if states else None,
         )
 
     planned_states = tuple(
@@ -2184,6 +2534,7 @@ def _route_component_placements(
             key=lambda state: state[0],
         )
     )
+    _logger.info("Finished component placement states=%s", len(planned_states))
     return planned_states, None
 
 
@@ -2374,12 +2725,31 @@ def _routing_component_candidates(
     candidates = []
     compatible_footprints = _footprints_for_component(component, footprint_map)
     if not compatible_footprints:
+        _logger.error(
+            "No footprint supports component refdes=%s kind=%s",
+            component.refdes,
+            component.kind,
+        )
         return (), f"No footprint supports component kind {component.kind!r}."
 
+    _logger.debug(
+        "Routing component candidate search refdes=%s compatible_footprints=%s "
+        "terminal_targets=%s preferred_column=%s",
+        component.refdes,
+        tuple(footprint.name for footprint in compatible_footprints),
+        terminal_targets,
+        preferred_column,
+    )
     for footprint_index, footprint in enumerate(compatible_footprints):
         try:
             _validate_component_footprint(component, footprint)
-        except ValueError:
+        except ValueError as error:
+            _logger.debug(
+                "Skipping incompatible footprint refdes=%s footprint=%s: %s",
+                component.refdes,
+                footprint.name,
+                error,
+            )
             continue
         for rotation_index, rotation in enumerate(
             _preferred_footprint_rotations(footprint)
@@ -2426,10 +2796,23 @@ def _routing_component_candidates(
 
     candidates = tuple(sorted(candidates, key=lambda item: item[0]))
     if not candidates:
+        _logger.error(
+            "No legal placement candidates refdes=%s board=%sx%s",
+            component.refdes,
+            board.width_pitches,
+            board.height_pitches,
+        )
         return (), (
             f"No legal placement candidates are available for {component.refdes!r} "
             f"on a {board.width_pitches}x{board.height_pitches} board."
         )
+    _logger.debug(
+        "Routing component candidates refdes=%s generated=%s kept=%s best_score=%s",
+        component.refdes,
+        len(candidates),
+        min(len(candidates), _routing_candidate_limit()),
+        candidates[0][0],
+    )
     return candidates[: _routing_candidate_limit()], None
 
 
@@ -2643,6 +3026,7 @@ def _component_route_pins(component, placed_component, footprint):
 
 def _routing_conflict_cuts(circuit, planned, footprint_map, fixed_cuts, connectors=()):
     cuts_by_hole = {(cut.row, cut.col): cut for cut in fixed_cuts}
+    generated_count = 0
     pins_by_row = {}
     for connector in connectors:
         pin = _connector_pin(connector)
@@ -2667,6 +3051,19 @@ def _routing_conflict_cuts(circuit, planned, footprint_map, fixed_cuts, connecto
                 continue
             cut_col = _first_cut_column_between(left_col, right_col, pin_columns)
             if cut_col is None:
+                _logger.debug(
+                    "Cannot isolate row=%s left=%s.%s col=%s net=%s right=%s.%s "
+                    "col=%s net=%s: no empty cut hole",
+                    row,
+                    left_pin.refdes,
+                    left_pin.terminal_name,
+                    left_col,
+                    left_pin.net_name,
+                    right_pin.refdes,
+                    right_pin.terminal_name,
+                    right_col,
+                    right_pin.net_name,
+                )
                 return (), (
                     f"Cannot isolate row {row} pins {left_pin.refdes}."
                     f"{left_pin.terminal_name} and {right_pin.refdes}."
@@ -2674,6 +3071,25 @@ def _routing_conflict_cuts(circuit, planned, footprint_map, fixed_cuts, connecto
                     "between them."
                 )
             cuts_by_hole[(row, cut_col)] = StripboardCut(row=row, col=cut_col)
+            generated_count += 1
+            _logger.debug(
+                "Inserted conflict cut row=%s col=%s between %s.%s net=%s and "
+                "%s.%s net=%s",
+                row,
+                cut_col,
+                left_pin.refdes,
+                left_pin.terminal_name,
+                left_pin.net_name,
+                right_pin.refdes,
+                right_pin.terminal_name,
+                right_pin.net_name,
+            )
+    if generated_count:
+        _logger.debug(
+            "Generated routing conflict cuts count=%s total_cuts=%s",
+            generated_count,
+            len(cuts_by_hole),
+        )
     return tuple(cuts_by_hole[key] for key in sorted(cuts_by_hole)), None
 
 
@@ -2699,6 +3115,17 @@ def _routing_connectivity_jumpers(layout, circuit, physical_netlist):
             if len(conductor.net_names) == 1:
                 conductors_by_net.setdefault(net_name, []).append(conductor)
 
+    split_nets = {
+        net_name: conductors
+        for net_name, conductors in conductors_by_net.items()
+        if len(conductors) >= 2
+    }
+    if split_nets:
+        _logger.debug(
+            "Routing connectivity jumpers split_nets=%s reserved_holes=%s",
+            {net_name: len(conductors) for net_name, conductors in split_nets.items()},
+            len(reserved_holes),
+        )
     for net_name, conductors in sorted(conductors_by_net.items()):
         if len(conductors) < 2:
             continue
@@ -2722,12 +3149,23 @@ def _routing_connectivity_jumpers(layout, circuit, physical_netlist):
             )
             jumpers.append(Jumper(start=start, end=end, net_name=net_name))
             reserved_holes.update((start, end))
+            _logger.debug(
+                "Selected jumper endpoints net=%s start=%s end=%s "
+                "conductor=%s connected=%s",
+                net_name,
+                start,
+                end,
+                conductor.index,
+                tuple(connected_conductor.index for connected_conductor in connected),
+            )
             connected.append(conductor)
             remaining = [
                 remaining_conductor
                 for remaining_conductor in remaining
                 if remaining_conductor.index != conductor.index
             ]
+    if jumpers:
+        _logger.debug("Routed connectivity jumpers count=%s", len(jumpers))
     return tuple(jumpers)
 
 
@@ -2776,6 +3214,11 @@ def _shortest_conductor_empty_hole_link(
                         )
                     )
     if not candidates:
+        _logger.debug(
+            "Cannot route jumper net=%s: no empty endpoint holes on disconnected "
+            "conductors",
+            net_name,
+        )
         raise ValueError(
             f"Cannot route jumper for net {net_name!r}; no empty jumper endpoint "
             "holes are available on the disconnected conductors."

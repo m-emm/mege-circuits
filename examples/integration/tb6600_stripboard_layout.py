@@ -1,5 +1,6 @@
 """Render the verified TB6600 stripboard build artifacts."""
 
+import logging
 from pathlib import Path
 
 from mege_circuits.simple import (
@@ -14,6 +15,8 @@ from mege_circuits.simple import (
     stripboard_hints_from_schema,
     write_stripboard_build_outputs,
 )
+
+_logger = logging.getLogger(__name__)
 
 try:
     from examples.integration.tb6600_stripboard_interface import (
@@ -69,7 +72,7 @@ def render_tb6600_stripboard_projection(output_dir=None, stem=STRIPBOARD_ARTIFAC
             schema,
             file=output_file,
         )
-        print(f"Wrote {output_file}")
+        _logger.info("Wrote %s", output_file)
     publish_tb6600_latest_artifact_links(svg_file, png_file)
     return svg_file, png_file
 
@@ -116,7 +119,7 @@ def render_tb6600_stripboard_build(output_dir=None):
         report=report,
     )
     for artifact in outputs.as_tuple():
-        print(f"Wrote {artifact}")
+        _logger.debug("Wrote %s", artifact)
     publish_tb6600_latest_artifact_links(*outputs.as_tuple())
     return outputs
 

@@ -1,8 +1,11 @@
 """Render a small high-side switch schematic."""
 
+import logging
 from pathlib import Path
 
 from mege_circuits.simple import *
+
+_logger = logging.getLogger(__name__)
 
 
 def create_high_side_switch():
@@ -70,7 +73,7 @@ def main():
     schema = create_high_side_switch()
     outfile = Path(__file__).with_name("high_side_switch.svg")
     render_schemdraw(schema, file=outfile)
-    print(f"Wrote {outfile}")
+    _logger.info("Wrote %s", outfile)
 
 
 if __name__ == "__main__":
