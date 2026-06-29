@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from examples.high_side_switch_v3 import create_high_side_switch
@@ -14,6 +16,7 @@ from mege_circuits.simple import (
     PlacedComponent,
     PlacedPin,
     StripboardBlocker,
+    StripboardBuildOutputs,
     StripboardCut,
     StripboardRoutingHints,
     circuit_from_schema,
@@ -28,6 +31,7 @@ from mege_circuits.simple import (
     score_stripboard_layout,
     stripboard_hints_from_schema,
     verify_stripboard_layout,
+    write_stripboard_build_outputs,
 )
 
 
@@ -256,6 +260,40 @@ def test_plan_stripboard_reports_failure_for_too_small_board():
     assert not report.ok
     assert report.errors[0].code == "routing_failed"
     assert "needs component row" in report.summary()
+
+
+def test_write_stripboard_build_outputs_writes_build_artifacts(tmp_path):
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+    layout, report = plan_stripboard(
+        circuit,
+        board=create_stripboard(5, 5),
+    )
+
+    outputs = write_stripboard_build_outputs(
+        layout,
+        circuit,
+        output_dir=tmp_path,
+        stem="manual_divider_build",
+        report=report,
+        run_id="test",
+    )
+
+    assert isinstance(outputs, StripboardBuildOutputs)
+    assert all(path.exists() for path in outputs.as_tuple())
+    assert 'class="layout-pin"' in outputs.top_svg.read_text(encoding="utf-8")
+    assert 'class="bottom-strip-cut"' in outputs.bottom_svg.read_text(encoding="utf-8")
+    assert 'class="debug-conductor-hole"' in outputs.debug_svg.read_text(
+        encoding="utf-8"
+    )
+    assert "## Top Jumpers" in outputs.checklist_md.read_text(encoding="utf-8")
+    data = json.loads(outputs.data_json.read_text(encoding="utf-8"))
+    assert data["verification"]["ok"] is True
+    assert data["layout"]["board"] == {
+        "height_pitches": 5,
+        "pitch_mm": 2.54,
+        "strip_direction": "horizontal",
+        "width_pitches": 5,
+    }
 
 
 def test_verify_stripboard_layout_reports_open_circuit():

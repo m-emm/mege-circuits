@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
 import mege_circuits.dsl as dsl
-from mege_circuits.circuit import Circuit, Component
+from mege_circuits.circuit import Circuit, Component, export_netlist
 from mege_circuits.dsl import Direction, Stripboard, StripboardBlocker, StripboardCut
 
 ERROR = "error"
@@ -196,6 +197,30 @@ class StripboardRoutingHints:
             self,
             "component_order",
             tuple(str(refdes) for refdes in self.component_order),
+        )
+
+
+@dataclass(frozen=True)
+class StripboardBuildOutputs:
+    top_svg: Path
+    top_png: Path
+    bottom_svg: Path
+    bottom_png: Path
+    debug_svg: Path
+    debug_png: Path
+    checklist_md: Path
+    data_json: Path
+
+    def as_tuple(self):
+        return (
+            self.top_svg,
+            self.top_png,
+            self.bottom_svg,
+            self.bottom_png,
+            self.debug_svg,
+            self.debug_png,
+            self.checklist_md,
+            self.data_json,
         )
 
 
@@ -484,6 +509,110 @@ def score_stripboard_layout(layout, circuit, report=None):
     )
 
 
+def write_stripboard_build_outputs(
+    layout,
+    circuit,
+    *,
+    output_dir,
+    stem,
+    report=None,
+    run_id=None,
+    scale=32,
+):
+    """Write top, bottom, debug, checklist, and JSON build artifacts."""
+
+    if report is None:
+        report = verify_stripboard_layout(layout, circuit)
+    if not isinstance(report, PhysicalVerificationReport):
+        raise TypeError("report must be a PhysicalVerificationReport.")
+    if not report.ok:
+        raise ValueError(report.summary())
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths = _build_output_paths(output_dir, stem, run_id)
+
+    render_stripboard_layout(layout, circuit, file=paths.top_svg, scale=scale)
+    render_stripboard_layout(layout, circuit, file=paths.top_png, scale=scale)
+    render_stripboard_bottom(layout, circuit, file=paths.bottom_svg, scale=scale)
+    render_stripboard_bottom(layout, circuit, file=paths.bottom_png, scale=scale)
+    render_stripboard_debug(
+        layout,
+        circuit,
+        report,
+        file=paths.debug_svg,
+        scale=scale,
+    )
+    render_stripboard_debug(
+        layout,
+        circuit,
+        report,
+        file=paths.debug_png,
+        scale=scale,
+    )
+    write_stripboard_build_checklist(layout, circuit, report, file=paths.checklist_md)
+    write_stripboard_build_json(layout, circuit, report, file=paths.data_json)
+    return paths
+
+
+def render_stripboard_bottom(layout, circuit, file, scale=32):
+    """Render the solder-side copper and cut view for a physical layout."""
+
+    _validate_renderable_layout(layout, circuit)
+    path = Path(file)
+    suffix = path.suffix.lower()
+    if suffix == ".svg":
+        _render_stripboard_bottom_svg(layout, circuit, path, scale)
+    elif suffix == ".png":
+        _render_stripboard_bottom_png(layout, circuit, path, scale)
+    else:
+        raise ValueError("Stripboard bottom output file must end in .svg or .png.")
+
+
+def render_stripboard_debug(layout, circuit, report, file, scale=32):
+    """Render a connectivity debug view from a verification report."""
+
+    _validate_renderable_layout(layout, circuit)
+    if not isinstance(report, PhysicalVerificationReport):
+        raise TypeError("report must be a PhysicalVerificationReport.")
+    if report.physical_netlist is None:
+        raise ValueError("Debug rendering requires a physical netlist in the report.")
+
+    path = Path(file)
+    suffix = path.suffix.lower()
+    if suffix == ".svg":
+        _render_stripboard_debug_svg(layout, circuit, report, path, scale)
+    elif suffix == ".png":
+        _render_stripboard_debug_png(layout, circuit, report, path, scale)
+    else:
+        raise ValueError("Stripboard debug output file must end in .svg or .png.")
+
+
+def write_stripboard_build_checklist(layout, circuit, report, file):
+    """Write a Markdown build checklist for a verified stripboard layout."""
+
+    if not isinstance(report, PhysicalVerificationReport):
+        raise TypeError("report must be a PhysicalVerificationReport.")
+    lines = _stripboard_build_checklist_lines(layout, circuit, report)
+    Path(file).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_stripboard_build_json(layout, circuit, report, file):
+    """Write machine-readable circuit, layout, and verification data."""
+
+    if not isinstance(report, PhysicalVerificationReport):
+        raise TypeError("report must be a PhysicalVerificationReport.")
+    Path(file).write_text(
+        json.dumps(
+            _stripboard_build_json_data(layout, circuit, report),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def render_stripboard_layout(layout, circuit, file, scale=32):
     """Render a manual physical stripboard layout as SVG or PNG."""
 
@@ -504,6 +633,527 @@ def render_stripboard_layout(layout, circuit, file, scale=32):
         _render_stripboard_layout_png(layout, circuit, path, scale)
     else:
         raise ValueError("Stripboard layout output file must end in .svg or .png.")
+
+
+def _validate_renderable_layout(layout, circuit):
+    if not isinstance(layout, PhysicalLayout):
+        raise TypeError("layout must be a PhysicalLayout object.")
+    if not isinstance(circuit, Circuit):
+        raise TypeError("circuit must be a Circuit object.")
+    if layout.board.strip_direction is not Direction.HORIZONTAL:
+        raise NotImplementedError("Only horizontal stripboards are supported for now.")
+    _validate_layout_geometry(layout, circuit, _footprints_by_name(layout.footprints))
+
+
+def _build_output_paths(output_dir, stem, run_id):
+    stem = str(stem)
+
+    def path_for(suffix, extension):
+        artifact_stem = f"{stem}{suffix}"
+        if run_id is not None:
+            artifact_stem = f"{artifact_stem}__{run_id}"
+        return output_dir / f"{artifact_stem}{extension}"
+
+    return StripboardBuildOutputs(
+        top_svg=path_for("", ".svg"),
+        top_png=path_for("", ".png"),
+        bottom_svg=path_for("_bottom", ".svg"),
+        bottom_png=path_for("_bottom", ".png"),
+        debug_svg=path_for("_debug", ".svg"),
+        debug_png=path_for("_debug", ".png"),
+        checklist_md=path_for("_checklist", ".md"),
+        data_json=path_for("_data", ".json"),
+    )
+
+
+def _render_stripboard_bottom_svg(layout, circuit, path, scale):
+    scale = dsl._validate_render_scale(scale)
+    width, height = dsl._stripboard_size(layout.board)
+    width_px = width * scale
+    height_px = height * scale
+    pins = placed_component_pins(layout, circuit)
+
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'width="{width_px:.0f}" height="{height_px:.0f}" '
+            f'viewBox="0 0 {width:.3f} {height:.3f}">'
+        ),
+        "  <title>Bottom Copper And Cuts</title>",
+        (
+            f'  <rect class="board bottom-view" x="0" y="0" width="{width:.3f}" '
+            f'height="{height:.3f}" fill="{dsl.STRIPBOARD_BOARD_FILL}" '
+            f'stroke="{dsl.STRIPBOARD_BOARD_STROKE}" '
+            f'stroke-width="{dsl.STRIPBOARD_STROKE_WIDTH:.3f}"/>'
+        ),
+    ]
+    _append_svg_bottom_board(lines, layout.board)
+    _append_svg_bottom_cuts(lines, layout)
+    _append_svg_bottom_pins(lines, layout, pins)
+    lines.append("</svg>")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _append_svg_bottom_board(lines, board):
+    for row in range(board.height_pitches):
+        x, y, strip_width, strip_height = dsl._stripboard_strip_rect(board, row)
+        lines.append(
+            f'  <rect class="bottom-copper-strip" data-row="{row}" '
+            f'x="{x:.3f}" y="{y:.3f}" width="{strip_width:.3f}" '
+            f'height="{strip_height:.3f}" fill="{dsl.STRIPBOARD_STRIP_FILL}" '
+            f'stroke="{dsl.STRIPBOARD_STRIP_STROKE}" '
+            f'stroke-width="{dsl.STRIPBOARD_STROKE_WIDTH:.3f}"/>'
+        )
+    for row in range(board.height_pitches):
+        for col in range(board.width_pitches):
+            x, y = _bottom_hole_position(board, (row, col))
+            lines.append(
+                f'  <circle class="bottom-hole" data-col="{col}" data-row="{row}" '
+                f'cx="{x:.3f}" cy="{y:.3f}" r="{dsl.STRIPBOARD_HOLE_RADIUS:.3f}" '
+                f'fill="{dsl.STRIPBOARD_HOLE_FILL}" stroke="{dsl.STRIPBOARD_HOLE_STROKE}" '
+                f'stroke-width="{dsl.STRIPBOARD_STROKE_WIDTH:.3f}"/>'
+            )
+
+
+def _append_svg_bottom_cuts(lines, layout):
+    for cut in layout.cuts:
+        x, y = _bottom_hole_position(layout.board, (cut.row, cut.col))
+        radius = dsl.STRIPBOARD_CUT_RADIUS
+        lines.append(
+            f'  <circle class="bottom-strip-cut" data-row="{cut.row}" '
+            f'data-col="{cut.col}" cx="{x:.3f}" cy="{y:.3f}" '
+            f'r="{radius:.3f}" fill="none" stroke="{dsl.STRIPBOARD_CUT_STROKE}" '
+            f'stroke-width="{dsl.STRIPBOARD_CUT_STROKE_WIDTH:.3f}"/>'
+        )
+        for x1, y1, x2, y2 in dsl._cut_cross_lines(x, y, radius):
+            lines.append(
+                f'  <line class="bottom-strip-cut-mark" data-row="{cut.row}" '
+                f'data-col="{cut.col}" x1="{x1:.3f}" y1="{y1:.3f}" '
+                f'x2="{x2:.3f}" y2="{y2:.3f}" '
+                f'stroke="{dsl.STRIPBOARD_CUT_STROKE}" '
+                f'stroke-width="{dsl.STRIPBOARD_CUT_STROKE_WIDTH:.3f}"/>'
+            )
+
+
+def _append_svg_bottom_pins(lines, layout, pins):
+    for pin in pins:
+        x, y = _bottom_hole_position(layout.board, pin.hole)
+        lines.append(
+            f'  <circle class="bottom-pin" data-net="{dsl._svg_attr(pin.net_name)}" '
+            f'data-element="{dsl._svg_attr(pin.refdes)}" '
+            f'data-terminal="{dsl._svg_attr(pin.terminal_name)}" '
+            f'data-row="{pin.row}" data-col="{pin.col}" '
+            f'cx="{x:.3f}" cy="{y:.3f}" '
+            f'r="{dsl.STRIPBOARD_OVERLAY_TERMINAL_RADIUS:.3f}" '
+            f'fill="{dsl.STRIPBOARD_OVERLAY_TERMINAL_FILL}"/>'
+        )
+
+
+def _render_stripboard_bottom_png(layout, circuit, path, scale):
+    scale = dsl._validate_render_scale(scale)
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError as error:
+        raise RuntimeError(
+            "Pillow is required to render stripboard bottom PNG files."
+        ) from error
+
+    width, height = dsl._stripboard_size(layout.board)
+    image = Image.new(
+        "RGB",
+        (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+        "white",
+    )
+    draw = ImageDraw.Draw(image)
+    dsl._draw_stripboard_base_png(draw, layout.board, scale)
+
+    for cut in layout.cuts:
+        _draw_bottom_cut_png(draw, layout.board, cut, scale)
+    for pin in placed_component_pins(layout, circuit):
+        dsl._draw_px_circle(
+            draw,
+            _bottom_hole_position(layout.board, pin.hole),
+            dsl.STRIPBOARD_OVERLAY_TERMINAL_RADIUS,
+            scale,
+            fill=dsl.STRIPBOARD_OVERLAY_TERMINAL_FILL,
+        )
+
+    image.save(path)
+
+
+def _draw_bottom_cut_png(draw, board, cut, scale):
+    x, y = _bottom_hole_position(board, (cut.row, cut.col))
+    radius = dsl.STRIPBOARD_CUT_RADIUS
+    stroke = max(1, int(round(dsl.STRIPBOARD_CUT_STROKE_WIDTH * scale)))
+    draw.ellipse(
+        dsl._px_rect(x - radius, y - radius, radius * 2, radius * 2, scale),
+        outline=dsl.STRIPBOARD_CUT_STROKE,
+        width=stroke,
+    )
+    for x1, y1, x2, y2 in dsl._cut_cross_lines(x, y, radius):
+        draw.line(
+            [dsl._px_point((x1, y1), scale), dsl._px_point((x2, y2), scale)],
+            fill=dsl.STRIPBOARD_CUT_STROKE,
+            width=stroke,
+        )
+
+
+def _render_stripboard_debug_svg(layout, circuit, report, path, scale):
+    scale = dsl._validate_render_scale(scale)
+    width, height = dsl._stripboard_size(layout.board)
+    width_px = width * scale
+    height_px = height * scale
+
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'width="{width_px:.0f}" height="{height_px:.0f}" '
+            f'viewBox="0 0 {width:.3f} {height:.3f}">'
+        ),
+        "  <title>Connectivity Debug View</title>",
+        (
+            f'  <rect class="board debug-view" x="0" y="0" width="{width:.3f}" '
+            f'height="{height:.3f}" fill="{dsl.STRIPBOARD_BOARD_FILL}" '
+            f'stroke="{dsl.STRIPBOARD_BOARD_STROKE}" '
+            f'stroke-width="{dsl.STRIPBOARD_STROKE_WIDTH:.3f}"/>'
+        ),
+    ]
+    _append_svg_debug_board(lines, layout.board)
+    _append_svg_debug_conductors(lines, report.physical_netlist)
+    _append_svg_debug_jumpers(lines, layout)
+    _append_svg_layout_pins(lines, placed_component_pins(layout, circuit))
+    lines.append("</svg>")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _append_svg_debug_board(lines, board):
+    for row in range(board.height_pitches):
+        x, y, strip_width, strip_height = dsl._stripboard_strip_rect(board, row)
+        lines.append(
+            f'  <rect class="debug-copper-strip" data-row="{row}" '
+            f'x="{x:.3f}" y="{y:.3f}" width="{strip_width:.3f}" '
+            f'height="{strip_height:.3f}" fill="{dsl.STRIPBOARD_STRIP_FILL}" '
+            f'opacity="0.25" stroke="{dsl.STRIPBOARD_STRIP_STROKE}" '
+            f'stroke-width="{dsl.STRIPBOARD_STROKE_WIDTH:.3f}"/>'
+        )
+    for col, row, x, y in dsl._stripboard_holes(board):
+        lines.append(
+            f'  <circle class="debug-hole" data-col="{col}" data-row="{row}" '
+            f'cx="{x:.3f}" cy="{y:.3f}" r="{dsl.STRIPBOARD_HOLE_RADIUS:.3f}" '
+            f'fill="{dsl.STRIPBOARD_HOLE_FILL}" stroke="{dsl.STRIPBOARD_HOLE_STROKE}" '
+            f'stroke-width="{dsl.STRIPBOARD_STROKE_WIDTH:.3f}" opacity="0.35"/>'
+        )
+
+
+def _append_svg_debug_conductors(lines, physical_netlist):
+    for conductor in physical_netlist.conductors:
+        color = _debug_conductor_color(conductor.index)
+        data_net = ",".join(conductor.net_names)
+        for segment in _conductor_row_segments(conductor.holes):
+            row, start_col, end_col = segment
+            start = dsl._stripboard_hole_position((row, start_col))
+            end = dsl._stripboard_hole_position((row, end_col))
+            lines.append(
+                f'  <line class="debug-conductor-segment" '
+                f'data-conductor="{conductor.index}" '
+                f'data-net="{dsl._svg_attr(data_net)}" data-row="{row}" '
+                f'data-start-col="{start_col}" data-end-col="{end_col}" '
+                f'x1="{start[0]:.3f}" y1="{start[1]:.3f}" '
+                f'x2="{end[0]:.3f}" y2="{end[1]:.3f}" '
+                f'stroke="{color}" stroke-width="0.180" stroke-linecap="round"/>'
+            )
+        for hole in conductor.holes:
+            x, y = dsl._stripboard_hole_position(hole)
+            lines.append(
+                f'  <circle class="debug-conductor-hole" '
+                f'data-conductor="{conductor.index}" '
+                f'data-net="{dsl._svg_attr(data_net)}" '
+                f'data-row="{hole[0]}" data-col="{hole[1]}" '
+                f'cx="{x:.3f}" cy="{y:.3f}" r="0.120" fill="{color}"/>'
+            )
+        if conductor.net_names:
+            x, y = dsl._stripboard_hole_position(conductor.holes[0])
+            lines.append(
+                f'  <text class="debug-net-label" '
+                f'data-conductor="{conductor.index}" '
+                f'data-net="{dsl._svg_attr(data_net)}" '
+                f'x="{x:.3f}" y="{y - 0.260:.3f}" font-size="0.180" '
+                f'font-weight="700" text-anchor="start" '
+                f'fill="{color}" stroke="{dsl.STRIPBOARD_OVERLAY_TEXT_HALO}" '
+                f'stroke-width="0.060" paint-order="stroke">'
+                f"{dsl._svg_text(data_net)}</text>"
+            )
+
+
+def _append_svg_debug_jumpers(lines, layout):
+    for jumper in layout.jumpers:
+        start = dsl._stripboard_hole_position(jumper.start)
+        end = dsl._stripboard_hole_position(jumper.end)
+        lines.append(
+            f'  <line class="debug-jumper" data-net="{dsl._svg_attr(jumper.net_name)}" '
+            f'data-start-row="{jumper.start[0]}" data-start-col="{jumper.start[1]}" '
+            f'data-end-row="{jumper.end[0]}" data-end-col="{jumper.end[1]}" '
+            f'x1="{start[0]:.3f}" y1="{start[1]:.3f}" '
+            f'x2="{end[0]:.3f}" y2="{end[1]:.3f}" '
+            f'stroke="{dsl.STRIPBOARD_OVERLAY_NODE_FILL}" '
+            f'stroke-width="0.115" stroke-linecap="round" '
+            f'stroke-dasharray="0.180 0.110"/>'
+        )
+
+
+def _render_stripboard_debug_png(layout, circuit, report, path, scale):
+    scale = dsl._validate_render_scale(scale)
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError as error:
+        raise RuntimeError(
+            "Pillow is required to render stripboard debug PNG files."
+        ) from error
+
+    width, height = dsl._stripboard_size(layout.board)
+    image = Image.new(
+        "RGB",
+        (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+        "white",
+    )
+    draw = ImageDraw.Draw(image)
+    dsl._draw_stripboard_base_png(draw, layout.board, scale)
+
+    for conductor in report.physical_netlist.conductors:
+        color = _debug_conductor_color(conductor.index)
+        stroke = max(2, int(round(0.18 * scale)))
+        for row, start_col, end_col in _conductor_row_segments(conductor.holes):
+            draw.line(
+                [
+                    dsl._px_point(
+                        dsl._stripboard_hole_position((row, start_col)), scale
+                    ),
+                    dsl._px_point(dsl._stripboard_hole_position((row, end_col)), scale),
+                ],
+                fill=color,
+                width=stroke,
+            )
+        for hole in conductor.holes:
+            dsl._draw_px_circle(
+                draw,
+                dsl._stripboard_hole_position(hole),
+                0.12,
+                scale,
+                fill=color,
+            )
+
+    jumper_width = max(1, int(round(0.115 * scale)))
+    for jumper in layout.jumpers:
+        draw.line(
+            [
+                dsl._px_point(dsl._stripboard_hole_position(jumper.start), scale),
+                dsl._px_point(dsl._stripboard_hole_position(jumper.end), scale),
+            ],
+            fill=dsl.STRIPBOARD_OVERLAY_NODE_FILL,
+            width=jumper_width,
+        )
+
+    for pin in placed_component_pins(layout, circuit):
+        dsl._draw_px_circle(
+            draw,
+            dsl._stripboard_hole_position(pin.hole),
+            dsl.STRIPBOARD_OVERLAY_TERMINAL_RADIUS,
+            scale,
+            fill=dsl.STRIPBOARD_OVERLAY_TERMINAL_FILL,
+        )
+
+    image.save(path)
+
+
+def _bottom_hole_position(board, hole):
+    row, col = hole
+    return (
+        dsl.STRIPBOARD_BOARD_MARGIN + (board.width_pitches - 1 - col),
+        dsl.STRIPBOARD_BOARD_MARGIN + row,
+    )
+
+
+def _conductor_row_segments(holes):
+    segments = []
+    holes_by_row = {}
+    for row, col in holes:
+        holes_by_row.setdefault(row, []).append(col)
+    for row, cols in sorted(holes_by_row.items()):
+        sorted_cols = sorted(cols)
+        start = sorted_cols[0]
+        previous = start
+        for col in sorted_cols[1:]:
+            if col == previous + 1:
+                previous = col
+                continue
+            segments.append((row, start, previous))
+            start = col
+            previous = col
+        segments.append((row, start, previous))
+    return tuple(segments)
+
+
+def _debug_conductor_color(index):
+    colors = (
+        "#2563eb",
+        "#dc2626",
+        "#16a34a",
+        "#9333ea",
+        "#ea580c",
+        "#0891b2",
+        "#be123c",
+        "#4f46e5",
+        "#65a30d",
+        "#ca8a04",
+    )
+    return colors[index % len(colors)]
+
+
+def _stripboard_build_checklist_lines(layout, circuit, report):
+    lines = [
+        f"# {circuit.name} Stripboard Build Checklist",
+        "",
+        f"- Verification: {'OK' if report.ok else 'FAILED'}",
+        f"- Board: {layout.board.width_pitches} x {layout.board.height_pitches} holes",
+        f"- Pitch: {layout.board.pitch_mm:g} mm",
+        "",
+        "## Components",
+    ]
+    pins_by_component = {}
+    for pin in placed_component_pins(layout, circuit):
+        pins_by_component.setdefault(pin.refdes, []).append(pin)
+    components_by_refdes = {
+        component.refdes: component for component in circuit.components
+    }
+    for placed_component in layout.placed_components:
+        component = components_by_refdes[placed_component.refdes]
+        value = "" if component.value is None else f" {component.value}"
+        lines.append(
+            "- [ ] "
+            f"{component.refdes}{value} ({component.kind}) "
+            f"footprint `{placed_component.footprint_name}` "
+            f"origin row {placed_component.origin[0]}, col {placed_component.origin[1]}, "
+            f"rotation {placed_component.rotation}"
+        )
+        for pin in pins_by_component.get(component.refdes, ()):
+            lines.append(
+                "  - "
+                f"{pin.terminal_name}: net `{pin.net_name}`, "
+                f"row {pin.row}, col {pin.col}"
+            )
+
+    lines.extend(["", "## Strip Cuts"])
+    for cut in layout.cuts:
+        lines.append(
+            "- [ ] "
+            f"Cut row {cut.row}, col {cut.col} "
+            f"(bottom-view col {_bottom_view_col(layout.board, cut.col)})"
+        )
+
+    lines.extend(["", "## Top Jumpers"])
+    for jumper in layout.jumpers:
+        lines.append(
+            "- [ ] "
+            f"`{jumper.net_name}`: row {jumper.start[0]}, col {jumper.start[1]} "
+            f"to row {jumper.end[0]}, col {jumper.end[1]}"
+        )
+
+    lines.extend(["", "## Verification"])
+    if report.issues:
+        for issue in report.issues:
+            lines.append(f"- {issue.severity.upper()} `{issue.code}`: {issue.message}")
+    else:
+        lines.append("- No verification issues.")
+
+    return lines
+
+
+def _stripboard_build_json_data(layout, circuit, report):
+    return {
+        "circuit": export_netlist(circuit),
+        "layout": {
+            "board": {
+                "width_pitches": layout.board.width_pitches,
+                "height_pitches": layout.board.height_pitches,
+                "strip_direction": layout.board.strip_direction.name.lower(),
+                "pitch_mm": layout.board.pitch_mm,
+            },
+            "placed_components": [
+                {
+                    "refdes": component.refdes,
+                    "footprint_name": component.footprint_name,
+                    "origin": list(component.origin),
+                    "rotation": component.rotation,
+                }
+                for component in layout.placed_components
+            ],
+            "cuts": [{"row": cut.row, "col": cut.col} for cut in layout.cuts],
+            "jumpers": [
+                {
+                    "net_name": jumper.net_name,
+                    "start": list(jumper.start),
+                    "end": list(jumper.end),
+                }
+                for jumper in layout.jumpers
+            ],
+            "blockers": [
+                {
+                    "row": blocker.row,
+                    "col": blocker.col,
+                    "element_name": blocker.element_name,
+                }
+                for blocker in layout.blockers
+            ],
+        },
+        "verification": {
+            "ok": report.ok,
+            "issues": [
+                {
+                    "severity": issue.severity,
+                    "code": issue.code,
+                    "message": issue.message,
+                    "subject": issue.subject,
+                    "holes": [list(hole) for hole in issue.holes],
+                }
+                for issue in report.issues
+            ],
+            "physical_netlist": (
+                None
+                if report.physical_netlist is None
+                else _physical_netlist_json_data(report.physical_netlist)
+            ),
+        },
+    }
+
+
+def _physical_netlist_json_data(physical_netlist):
+    return {
+        "conductors": [
+            {
+                "index": conductor.index,
+                "holes": [list(hole) for hole in conductor.holes],
+                "net_names": list(conductor.net_names),
+                "pins": [
+                    {
+                        "refdes": pin.refdes,
+                        "terminal_name": pin.terminal_name,
+                        "net_name": pin.net_name,
+                        "row": pin.row,
+                        "col": pin.col,
+                        "footprint_name": pin.footprint_name,
+                    }
+                    for pin in conductor.pins
+                ],
+            }
+            for conductor in physical_netlist.conductors
+        ],
+    }
+
+
+def _bottom_view_col(board, col):
+    return board.width_pitches - 1 - col
 
 
 def footprint_for_component(component, footprints):

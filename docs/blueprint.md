@@ -526,6 +526,14 @@ Once layouts verify, add build-oriented outputs:
 The SVGs should remain inspectable: preserve `data-net`, `data-row`,
 `data-col`, `data-element`, and `data-terminal` attributes where practical.
 
+Implementation status: this phase now has reusable build output helpers through
+`write_stripboard_build_outputs(...)`, `render_stripboard_bottom(...)`,
+`render_stripboard_debug(...)`, `write_stripboard_build_checklist(...)`, and
+`write_stripboard_build_json(...)` in `mege_circuits.physical`, exposed through
+`mege_circuits.simple`. The TB6600 integration script uses these helpers to
+generate a verified top assembly, bottom cut view, connectivity debug view,
+Markdown checklist, and machine-readable JSON.
+
 ## Renderer Refactor Plan
 
 The renderer should move toward a view-model boundary:

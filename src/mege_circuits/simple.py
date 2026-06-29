@@ -63,6 +63,7 @@ from mege_circuits.physical import (
     PhysicalVerificationReport,
     PlacedComponent,
     PlacedPin,
+    StripboardBuildOutputs,
     StripboardRoutingHints,
     create_manual_stripboard_layout,
     default_footprints,
@@ -70,10 +71,15 @@ from mege_circuits.physical import (
     footprint_for_component,
     placed_component_pins,
     plan_stripboard,
+    render_stripboard_bottom,
+    render_stripboard_debug,
     render_stripboard_layout,
     score_stripboard_layout,
     stripboard_hints_from_schema,
     verify_stripboard_layout,
+    write_stripboard_build_checklist,
+    write_stripboard_build_json,
+    write_stripboard_build_outputs,
 )
 
 __all__ = [
@@ -102,6 +108,7 @@ __all__ = [
     "SchemaNetVisualization",
     "SchemaTerminalVisualization",
     "Stripboard",
+    "StripboardBuildOutputs",
     "StripboardBlocker",
     "StripboardCut",
     "StripboardLocalPoint",
@@ -138,6 +145,8 @@ __all__ = [
     "permute_stripboard_rows_for_element_span",
     "render_schemdraw",
     "render_stripboard",
+    "render_stripboard_bottom",
+    "render_stripboard_debug",
     "render_stripboard_layout",
     "render_stripboard_overlay",
     "rotate",
@@ -146,4 +155,7 @@ __all__ = [
     "stripboard_hints_from_schema",
     "translate",
     "verify_stripboard_layout",
+    "write_stripboard_build_checklist",
+    "write_stripboard_build_json",
+    "write_stripboard_build_outputs",
 ]
