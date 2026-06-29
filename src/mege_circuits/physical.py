@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
@@ -391,6 +391,20 @@ def default_footprints():
             blockers=(),
         ),
         Footprint(
+            name="to92_cbe_staggered_013",
+            component_kinds=("bjt_npn",),
+            pins={"collector": (0, 0), "base": (0, 1), "emitter": (0, 3)},
+            allowed_rotations=(0, 90, 180, 270),
+            blockers=((0, 2),),
+        ),
+        Footprint(
+            name="to92_ceb_staggered_013",
+            component_kinds=("bjt_npn",),
+            pins={"collector": (0, 0), "emitter": (0, 1), "base": (0, 3)},
+            allowed_rotations=(0, 90, 180, 270),
+            blockers=((0, 2),),
+        ),
+        Footprint(
             name="to220_gds",
             component_kinds=("pmos",),
             pins={"gate": (0, 0), "drain": (0, 2), "source": (0, 4)},
@@ -659,86 +673,122 @@ def plan_stripboard(
         return None, _routing_failure_report(str(error))
 
     net_rows = _routing_net_rows(circuit, routing_hints)
-    planned_states, placement_error = _route_component_placements(
-        circuit,
-        board,
-        footprint_map,
-        routing_hints,
-        fixed_placement_map,
-        net_rows,
-        reserved_holes={connector.hole for connector in routing_connectors},
-    )
-    if placement_error is not None:
-        return None, _routing_failure_report(placement_error)
-
     best_layout = None
     best_report = None
     best_score = None
     last_routing_error = None
-    for planned, placement_score in planned_states:
-        generated_cuts, cut_error = _routing_conflict_cuts(
+    pending_orders = [_routing_component_order(circuit, routing_hints)]
+    seen_orders = set()
+    queued_orders = set(pending_orders)
+    while pending_orders and len(seen_orders) < _routing_shake_order_limit():
+        component_order = pending_orders.pop(0)
+        queued_orders.discard(component_order)
+        if component_order in seen_orders:
+            continue
+        seen_orders.add(component_order)
+        order_hints = replace(routing_hints, component_order=component_order)
+        planned_states, placement_error = _route_component_placements(
             circuit,
-            planned,
+            board,
             footprint_map,
-            normalized_fixed_cuts,
-            routing_connectors,
+            order_hints,
+            fixed_placement_map,
+            net_rows,
+            reserved_holes={connector.hole for connector in routing_connectors},
         )
-        if cut_error is not None:
+        if placement_error is not None:
+            last_routing_error = placement_error
             continue
 
-        try:
-            base_layout = create_manual_stripboard_layout(
+        run_best_layout = None
+        run_best_score = None
+        for planned, placement_score in planned_states:
+            generated_cuts, cut_error = _routing_conflict_cuts(
                 circuit,
-                board=board,
-                footprints=tuple(footprint_map[name] for name in sorted(footprint_map)),
-                placements=planned,
-                cuts=_dedupe_cuts((*normalized_fixed_cuts, *generated_cuts)),
-                jumpers=_dedupe_jumpers(normalized_fixed_jumpers),
-                connectors=routing_connectors,
+                planned,
+                footprint_map,
+                normalized_fixed_cuts,
+                routing_connectors,
             )
-        except (TypeError, ValueError):
-            continue
-
-        base_report = verify_stripboard_layout(base_layout, circuit)
-        if _routing_report_has_unfixable_errors(base_report):
-            report = base_report
-            layout = base_layout
-        else:
-            try:
-                generated_jumpers = _routing_connectivity_jumpers(
-                    base_layout,
-                    circuit,
-                    base_report.physical_netlist,
-                )
-            except ValueError as error:
-                last_routing_error = str(error)
+            if cut_error is not None:
                 continue
+
             try:
-                layout = create_manual_stripboard_layout(
+                base_layout = create_manual_stripboard_layout(
                     circuit,
                     board=board,
                     footprints=tuple(
                         footprint_map[name] for name in sorted(footprint_map)
                     ),
                     placements=planned,
-                    cuts=base_layout.cuts,
-                    jumpers=_dedupe_jumpers(
-                        (*normalized_fixed_jumpers, *generated_jumpers)
-                    ),
+                    cuts=_dedupe_cuts((*normalized_fixed_cuts, *generated_cuts)),
+                    jumpers=_dedupe_jumpers(normalized_fixed_jumpers),
                     connectors=routing_connectors,
                 )
             except (TypeError, ValueError):
                 continue
-            report = verify_stripboard_layout(layout, circuit)
 
-        if report.ok:
-            layout, report = _left_compact_stripboard_layout(layout, circuit)
+            base_report = verify_stripboard_layout(base_layout, circuit)
+            if _routing_report_has_unfixable_errors(base_report):
+                report = base_report
+                layout = base_layout
+            else:
+                try:
+                    generated_jumpers = _routing_connectivity_jumpers(
+                        base_layout,
+                        circuit,
+                        base_report.physical_netlist,
+                    )
+                except ValueError as error:
+                    last_routing_error = str(error)
+                    continue
+                try:
+                    layout = create_manual_stripboard_layout(
+                        circuit,
+                        board=board,
+                        footprints=tuple(
+                            footprint_map[name] for name in sorted(footprint_map)
+                        ),
+                        placements=planned,
+                        cuts=base_layout.cuts,
+                        jumpers=_dedupe_jumpers(
+                            (*normalized_fixed_jumpers, *generated_jumpers)
+                        ),
+                        connectors=routing_connectors,
+                    )
+                except (TypeError, ValueError):
+                    continue
+                report = verify_stripboard_layout(layout, circuit)
 
-        score = _routing_layout_score(layout, report, placement_score)
-        if best_score is None or score < best_score:
-            best_layout = layout
-            best_report = report
-            best_score = score
+            if report.ok:
+                layout, report = _left_compact_stripboard_layout(
+                    layout,
+                    circuit,
+                    locked_refdeses=fixed_placement_map,
+                )
+
+            score = _routing_layout_score(layout, report, placement_score, circuit)
+            if best_score is None or score < best_score:
+                best_layout = layout
+                best_report = report
+                best_score = score
+            if report.ok and (run_best_score is None or score < run_best_score):
+                run_best_layout = layout
+                run_best_score = score
+
+        if run_best_layout is None:
+            continue
+        if len(run_best_layout.jumpers) <= _routing_shake_jumper_threshold():
+            continue
+        for order in _routing_shake_orders_from_layout(
+            circuit,
+            routing_hints,
+            run_best_layout,
+        ):
+            if order in seen_orders or order in queued_orders:
+                continue
+            pending_orders.append(order)
+            queued_orders.add(order)
 
     if best_layout is not None:
         return best_layout, best_report
@@ -763,11 +813,18 @@ def score_stripboard_layout(layout, circuit, report=None):
     )
 
 
-def _left_compact_stripboard_layout(layout, circuit, *, trim_margin=1):
+def _left_compact_stripboard_layout(
+    layout,
+    circuit,
+    *,
+    trim_margin=1,
+    locked_refdeses=(),
+):
     report = verify_stripboard_layout(layout, circuit)
     if not report.ok:
         return layout, report
 
+    locked_refdeses = frozenset(str(refdes) for refdes in locked_refdeses)
     compacted = layout
     compacted_report = report
     compacted_score = _left_compaction_score(compacted)
@@ -778,7 +835,7 @@ def _left_compact_stripboard_layout(layout, circuit, *, trim_margin=1):
 
     for _ in range(max_iterations):
         accepted = None
-        for unit in _left_compaction_units(compacted):
+        for unit in _left_compaction_units(compacted, locked_refdeses):
             accepted = _left_compaction_best_move(
                 compacted,
                 circuit,
@@ -808,11 +865,13 @@ def _left_compaction_unit_count(layout):
     )
 
 
-def _left_compaction_units(layout):
+def _left_compaction_units(layout, locked_refdeses=frozenset()):
     footprint_map = _footprints_by_name(layout.footprints)
     units = []
     components = []
     for placed_component in layout.placed_components:
+        if placed_component.refdes in locked_refdeses:
+            continue
         holes = _placed_component_occupied_holes(placed_component, footprint_map)
         components.append(
             (
@@ -1051,7 +1110,9 @@ def _left_compaction_verified_candidate(
     )
     if candidate is None or not report.ok:
         return None
-    if _left_compaction_has_cut_blocker_collision(candidate):
+    if _left_compaction_cut_blocker_collisions(
+        candidate
+    ) - _left_compaction_cut_blocker_collisions(layout):
         return None
     candidate_score = _left_compaction_score(candidate)
     if candidate_score >= current_score:
@@ -1123,9 +1184,13 @@ def _left_compaction_score(layout):
     )
 
 
-def _left_compaction_has_cut_blocker_collision(layout):
+def _left_compaction_cut_blocker_collisions(layout):
     cut_holes = {(cut.row, cut.col) for cut in layout.cuts}
-    return any((blocker.row, blocker.col) in cut_holes for blocker in layout.blockers)
+    return frozenset(
+        (blocker.row, blocker.col, blocker.element_name)
+        for blocker in layout.blockers
+        if (blocker.row, blocker.col) in cut_holes
+    )
 
 
 def _layout_col_sum(layout):
@@ -2135,6 +2200,80 @@ def _routing_component_order(circuit, hints):
     return tuple((*ordered, *remaining))
 
 
+def _routing_shake_orders_from_layout(circuit, hints, layout):
+    baseline = _routing_component_order(circuit, hints)
+    jumper_net_names = tuple(
+        dict.fromkeys(jumper.net_name for jumper in layout.jumpers)
+    )
+    orders = []
+    seen = {baseline}
+    for net_name in jumper_net_names:
+        order = _routing_focus_net_component_order(circuit, hints, net_name)
+        if order and order not in seen:
+            orders.append(order)
+            seen.add(order)
+
+    combined_order = _routing_focus_net_component_order(
+        circuit, hints, jumper_net_names
+    )
+    if combined_order and combined_order not in seen:
+        orders.append(combined_order)
+    return tuple(orders)
+
+
+def _routing_focus_net_component_order(circuit, hints, net_names):
+    if isinstance(net_names, str):
+        net_names = (net_names,)
+    focus_net_names = frozenset(str(net_name) for net_name in net_names)
+    if not focus_net_names:
+        return ()
+
+    baseline = _routing_component_order(circuit, hints)
+    components_by_refdes = {
+        component.refdes: component for component in circuit.components
+    }
+    seed_refdeses = {
+        component.refdes
+        for component in circuit.components
+        if any(terminal.net_name in focus_net_names for terminal in component.terminals)
+    }
+    if not seed_refdeses:
+        return ()
+
+    seed_net_names = {
+        terminal.net_name
+        for refdes in seed_refdeses
+        for terminal in components_by_refdes[refdes].terminals
+    }
+    focus_refdeses = {
+        component.refdes
+        for component in circuit.components
+        if any(terminal.net_name in seed_net_names for terminal in component.terminals)
+    }
+    focus_order = tuple(
+        sorted(
+            focus_refdeses,
+            key=lambda refdes: _routing_focus_component_sort_key(
+                components_by_refdes[refdes],
+                hints,
+                seed_refdeses,
+            ),
+        )
+    )
+    return tuple(
+        (*focus_order, *(refdes for refdes in baseline if refdes not in focus_refdeses))
+    )
+
+
+def _routing_focus_component_sort_key(component, hints, seed_refdeses):
+    return (
+        int(component.refdes not in seed_refdeses),
+        int(component.kind not in DIRECTIONAL_TERMINAL_LABEL_KINDS),
+        hints.component_columns.get(component.refdes, 0),
+        component.refdes,
+    )
+
+
 def _routing_preferred_component_columns(circuit, board, hints, ordered_refdeses):
     spread_columns = {}
     denominator = max(1, len(ordered_refdeses) + 1)
@@ -2649,16 +2788,43 @@ def _available_conductor_jumper_holes(conductor, reserved_holes):
     return tuple(hole for hole in conductor.holes if hole not in reserved_holes)
 
 
-def _routing_layout_score(layout, report, placement_score):
+def _routing_layout_score(layout, report, placement_score, circuit=None):
     return (
         int(not report.ok),
         len(report.errors),
-        len(layout.cuts),
         len(layout.jumpers),
+        _layout_pre_jumper_fragment_count(layout, circuit) if report.ok else 0,
+        len(layout.cuts),
         _layout_used_height(layout),
         _layout_jumper_length(layout),
         *placement_score,
         _layout_used_width(layout),
+    )
+
+
+def _layout_pre_jumper_fragment_count(layout, circuit):
+    if circuit is None or not layout.jumpers:
+        return 0
+    jumperless_layout = PhysicalLayout(
+        board=layout.board,
+        placed_components=layout.placed_components,
+        cuts=layout.cuts,
+        jumpers=(),
+        connectors=layout.connectors,
+        blockers=layout.blockers,
+        annotations=layout.annotations,
+        footprints=layout.footprints,
+    )
+    physical_netlist = _extract_physical_netlist_unchecked(jumperless_layout, circuit)
+    conductor_indexes_by_net = {}
+    for conductor in physical_netlist.conductors:
+        for pin in conductor.pins:
+            conductor_indexes_by_net.setdefault(pin.net_name, set()).add(
+                conductor.index
+            )
+    return sum(
+        max(0, len(conductor_indexes) - 1)
+        for conductor_indexes in conductor_indexes_by_net.values()
     )
 
 
@@ -2686,6 +2852,14 @@ def _routing_beam_width():
 
 def _routing_candidate_limit():
     return 192
+
+
+def _routing_shake_order_limit():
+    return 4
+
+
+def _routing_shake_jumper_threshold():
+    return 2
 
 
 def _routing_small_offsets():

@@ -130,6 +130,43 @@ def test_manual_layout_rotates_footprint_pins_on_grid():
     assert pins[("R2", "end")] == (0, 2)
 
 
+def test_staggered_to92_footprint_rotates_and_labels_terminal_holes(tmp_path):
+    circuit = Circuit(
+        name="staggered_bjt",
+        components=(
+            Component(
+                "Q1",
+                "bjt_npn",
+                "BC337",
+                (
+                    Terminal("collector", "collector"),
+                    Terminal("base", "base"),
+                    Terminal("emitter", "emitter"),
+                ),
+            ),
+        ),
+        nets=(create_net("collector"), create_net("base"), create_net("emitter")),
+    )
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(8, 6),
+        placements={"Q1": ("to92_cbe_staggered_013", (1, 4), 90)},
+    )
+    pins = {
+        pin.terminal_name: pin.hole for pin in placed_component_pins(layout, circuit)
+    }
+    svg_path = tmp_path / "staggered_q1.svg"
+
+    render_stripboard_layout(layout, circuit, file=svg_path)
+    svg = svg_path.read_text(encoding="utf-8")
+
+    assert pins == {"collector": (1, 4), "base": (2, 4), "emitter": (4, 4)}
+    assert svg.count('class="layout-terminal-hole-label"') == 3
+    assert 'data-terminal="collector" data-row="1" data-col="4"' in svg
+    assert 'data-terminal="base" data-row="2" data-col="4"' in svg
+    assert 'data-terminal="emitter" data-row="4" data-col="4"' in svg
+
+
 def test_render_stripboard_layout_writes_svg_and_png(tmp_path):
     circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
     layout = create_manual_stripboard_layout(
@@ -327,6 +364,31 @@ def test_left_compaction_moves_components_as_rigid_units_and_trims_board():
     assert compacted.jumpers == (Jumper(start=(3, 2), end=(1, 2), net_name="midpoint"),)
 
 
+def test_left_compaction_respects_locked_component_placements():
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(10, 5),
+        placements={
+            "R1": ("axial_2pin_span3", (0, 5), 90),
+            "R2": ("axial_2pin_span3", (1, 7), 90),
+        },
+        jumpers=(((3, 4), (1, 6), "midpoint"),),
+    )
+
+    compacted, report = physical._left_compact_stripboard_layout(
+        layout,
+        circuit,
+        locked_refdeses=("R1",),
+    )
+
+    assert report.ok, report.summary()
+    assert compacted.board.width_pitches == 7
+    assert {
+        component.refdes: component.origin for component in compacted.placed_components
+    } == {"R1": (0, 5), "R2": (1, 0)}
+
+
 def test_left_compaction_moves_connectors_left_without_losing_identity():
     circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
     layout = create_manual_stripboard_layout(
@@ -422,6 +484,114 @@ def test_left_compaction_keeps_jumper_endpoints_inside_cut_bounded_segment():
     assert compacted.board.width_pitches == 6
     assert compacted.cuts == (StripboardCut(row=1, col=2),)
     assert compacted.jumpers == (Jumper(start=(0, 1), end=(1, 4), net_name="n"),)
+
+
+def test_bridge_first_score_prefers_fewer_jumpers_over_narrower_width():
+    footprints = (
+        Footprint(
+            name="test_pin",
+            component_kinds=("test_pin",),
+            pins={"pin": (0, 0)},
+            allowed_rotations=(0,),
+        ),
+    )
+    circuit = Circuit(
+        name="bridge_score",
+        components=(
+            Component("P1", "test_pin", None, (Terminal("pin", "n"),)),
+            Component("P2", "test_pin", None, (Terminal("pin", "n"),)),
+        ),
+        nets=(create_net("n"),),
+    )
+    narrower_with_jumper = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(3, 2),
+        footprints=footprints,
+        placements={
+            "P1": ("test_pin", (0, 0), 0),
+            "P2": ("test_pin", (1, 0), 0),
+        },
+        jumpers=(((0, 1), (1, 1), "n"),),
+    )
+    wider_without_jumper = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(5, 2),
+        footprints=footprints,
+        placements={
+            "P1": ("test_pin", (0, 3), 0),
+            "P2": ("test_pin", (0, 4), 0),
+        },
+    )
+    narrow_report = verify_stripboard_layout(narrower_with_jumper, circuit)
+    wide_report = verify_stripboard_layout(wider_without_jumper, circuit)
+
+    assert narrow_report.ok, narrow_report.summary()
+    assert wide_report.ok, wide_report.summary()
+    assert physical._routing_layout_score(
+        wider_without_jumper,
+        wide_report,
+        physical._routing_zero_score(),
+        circuit,
+    ) < physical._routing_layout_score(
+        narrower_with_jumper,
+        narrow_report,
+        physical._routing_zero_score(),
+        circuit,
+    )
+
+
+def test_shake_orders_prioritize_bridge_net_transistor_and_neighbors():
+    circuit = Circuit(
+        name="shake_order",
+        components=(
+            Component(
+                "Q1",
+                "bjt_npn",
+                "BC337",
+                (
+                    Terminal("collector", "n"),
+                    Terminal("base", "base"),
+                    Terminal("emitter", "gnd"),
+                ),
+            ),
+            Component(
+                "R1",
+                "resistor",
+                "10K",
+                (Terminal("start", "n"), Terminal("end", "vcc")),
+            ),
+            Component(
+                "R2",
+                "resistor",
+                "10K",
+                (Terminal("start", "base"), Terminal("end", "gpio")),
+            ),
+        ),
+        nets=(
+            create_net("base"),
+            create_net("gpio"),
+            create_net("gnd"),
+            create_net("n"),
+            create_net("vcc"),
+        ),
+    )
+    hints = StripboardRoutingHints(
+        component_order=("R1", "R2", "Q1"),
+        component_columns={"R1": 1, "R2": 2, "Q1": 3},
+    )
+    layout = PhysicalLayout(
+        board=create_stripboard(4, 4),
+        placed_components=(),
+        cuts=(),
+        jumpers=(Jumper(start=(0, 0), end=(1, 0), net_name="n"),),
+        footprints=default_footprints(),
+    )
+
+    orders = physical._routing_shake_orders_from_layout(circuit, hints, layout)
+
+    assert orders
+    assert orders[0][0] == "Q1"
+    assert orders[0].index("R1") < orders[0].index("R2")
 
 
 def test_plan_stripboard_routes_voltage_divider_with_verified_layout():
@@ -574,11 +744,18 @@ def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(tmp_path):
     _schema, circuit, layout, report = create_tb6600_verified_stripboard_plan()
 
     assert report.ok, report.summary()
-    assert layout.board.width_pitches < 18
-    assert layout.board.height_pitches <= 12
-    assert len(layout.cuts) <= 8
-    assert len(layout.jumpers) <= 18
+    assert layout.board.width_pitches <= 14
+    assert layout.board.height_pitches == 9
+    assert len(layout.cuts) <= 5
+    assert len(layout.jumpers) <= 2
+    assert physical._left_compaction_cut_blocker_collisions(layout) == frozenset()
+    assert all(jumper.net_name != "ena_plus" for jumper in layout.jumpers)
     _assert_jumper_endpoints_are_dedicated(layout, circuit)
+    assert any(
+        component.refdes == "Q3"
+        and component.footprint_name == "to92_cbe_staggered_013"
+        for component in layout.placed_components
+    )
     assert any(
         connector.name == "STEP_minus"
         and connector.label == "PUL-"
@@ -591,6 +768,17 @@ def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(tmp_path):
         )
         for conductor in report.physical_netlist.conductors
     )
+    assert any(
+        {(pin.refdes, pin.terminal_name) for pin in conductor.pins}.issuperset(
+            {
+                ("Q3", "collector"),
+                ("R5", "end"),
+                ("R6", "end"),
+                ("ena_plus", "pin"),
+            }
+        )
+        for conductor in report.physical_netlist.conductors
+    )
 
     svg_path = tmp_path / "tb6600.svg"
     render_stripboard_layout(layout, circuit, file=svg_path)
@@ -600,7 +788,6 @@ def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(tmp_path):
     assert svg.count('class="layout-terminal-hole-label"') == len(directional_pins)
     assert 'class="layout-pin-label"' not in svg
     assert 'class="layout-jumper-endpoint"' in svg
-    assert 'data-shape="elbow"' in svg
     assert 'class="layout-component-body"' in svg
     assert svg.index('class="layout-component"') < svg.index(
         'class="layout-component-body-label"'
@@ -633,9 +820,15 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(tmp_path):
     assert 'class="bottom-connector"' in outputs.bottom_svg.read_text(encoding="utf-8")
     assert "## External Connectors" in outputs.checklist_md.read_text(encoding="utf-8")
     data = json.loads(outputs.data_json.read_text(encoding="utf-8"))
-    assert data["layout"]["board"]["width_pitches"] < 18
-    assert len(data["layout"]["cuts"]) <= 6
-    assert len(data["layout"]["jumpers"]) <= 3
+    top_svg = outputs.top_svg.read_text(encoding="utf-8")
+    assert data["layout"]["board"]["width_pitches"] <= 14
+    assert data["layout"]["board"]["height_pitches"] == 9
+    assert len(data["layout"]["cuts"]) <= 5
+    assert len(data["layout"]["jumpers"]) <= 2
+    assert all(jumper["net_name"] != "ena_plus" for jumper in data["layout"]["jumpers"])
+    assert top_svg.count('class="layout-jumper-endpoint"') == 2 * len(
+        data["layout"]["jumpers"]
+    )
     assert any(
         connector["name"] == "STEP_minus"
         and connector["label"] == "PUL-"
