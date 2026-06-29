@@ -1,10 +1,12 @@
 import pytest
 
 import mege_circuits.dsl as circuit_dsl
+from examples.integration import tb6600_stripboard_interface as tb6600_interface
 from examples.high_side_switch_v3 import create_high_side_switch
 from examples.integration.tb6600_stripboard_interface import (
     SCHEMATIC_ARTIFACT_STEM,
     create_schema_for_tb6600_interface,
+    prepare_tb6600_artifact_outputs,
     render_tb6600_schematic,
 )
 from examples.integration.tb6600_stripboard_layout import (
@@ -293,6 +295,85 @@ def test_tb6600_integration_examples_render_stable_artifacts():
         stripboard_png,
     )
     assert not tuple(stripboard_svg.parent.glob("*projection*"))
+
+
+def test_prepare_tb6600_artifact_outputs_preserves_existing_files(tmp_path):
+    old_svg = tmp_path / f"{SCHEMATIC_ARTIFACT_STEM}__old.svg"
+    latest_svg = tmp_path / f"{SCHEMATIC_ARTIFACT_STEM}.svg"
+    old_svg.write_text("old svg", encoding="utf-8")
+    latest_svg.write_text("latest svg", encoding="utf-8")
+
+    svg_file, png_file = prepare_tb6600_artifact_outputs(
+        tmp_path, SCHEMATIC_ARTIFACT_STEM
+    )
+
+    assert old_svg.read_text(encoding="utf-8") == "old svg"
+    assert latest_svg.read_text(encoding="utf-8") == "latest svg"
+    assert svg_file.parent == tmp_path
+    assert png_file.parent == tmp_path
+    assert svg_file.stem.startswith(f"{SCHEMATIC_ARTIFACT_STEM}__")
+    assert png_file.stem.startswith(f"{SCHEMATIC_ARTIFACT_STEM}__")
+
+
+def test_tb6600_schematic_failure_preserves_existing_artifacts(tmp_path, monkeypatch):
+    old_svg = tmp_path / f"{SCHEMATIC_ARTIFACT_STEM}__old.svg"
+    old_png = tmp_path / f"{SCHEMATIC_ARTIFACT_STEM}__old.png"
+    latest_svg = tmp_path / f"{SCHEMATIC_ARTIFACT_STEM}.svg"
+    latest_png = tmp_path / f"{SCHEMATIC_ARTIFACT_STEM}.png"
+    old_svg.write_text("old svg", encoding="utf-8")
+    old_png.write_bytes(b"old png")
+    latest_svg.write_text("latest svg", encoding="utf-8")
+    latest_png.write_bytes(b"latest png")
+
+    def failing_render(_schema, file, show=False):
+        assert show is False
+        file.write_text("partial new artifact", encoding="utf-8")
+        raise RuntimeError("schematic render failed")
+
+    monkeypatch.setattr(tb6600_interface, "render_schemdraw", failing_render)
+
+    with pytest.raises(RuntimeError, match="schematic render failed"):
+        tb6600_interface.render_tb6600_schematic(tmp_path)
+
+    assert old_svg.read_text(encoding="utf-8") == "old svg"
+    assert old_png.read_bytes() == b"old png"
+    assert latest_svg.read_text(encoding="utf-8") == "latest svg"
+    assert latest_png.read_bytes() == b"latest png"
+    assert not tuple(tmp_path.glob(".tmp_*"))
+    assert tuple(tmp_path.glob(f"{SCHEMATIC_ARTIFACT_STEM}__*.svg")) == (old_svg,)
+    assert tuple(tmp_path.glob(f"{SCHEMATIC_ARTIFACT_STEM}__*.png")) == (old_png,)
+
+
+def test_tb6600_schematic_success_prunes_after_publish(tmp_path, monkeypatch):
+    old_svg = tmp_path / f"{SCHEMATIC_ARTIFACT_STEM}__old.svg"
+    old_png = tmp_path / f"{SCHEMATIC_ARTIFACT_STEM}__old.png"
+    old_svg.write_text("old svg", encoding="utf-8")
+    old_png.write_bytes(b"old png")
+
+    def fake_render(_schema, file, show=False):
+        assert show is False
+        if file.suffix == ".png":
+            file.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        else:
+            file.write_text("<svg></svg>", encoding="utf-8")
+
+    monkeypatch.setattr(tb6600_interface, "render_schemdraw", fake_render)
+
+    svg_file, png_file = tb6600_interface.render_tb6600_schematic(tmp_path)
+
+    assert svg_file.exists()
+    assert png_file.exists()
+    assert not old_svg.exists()
+    assert not old_png.exists()
+    assert not tuple(tmp_path.glob(".tmp_*"))
+    _assert_latest_artifact_link(
+        tmp_path / f"{SCHEMATIC_ARTIFACT_STEM}.svg",
+        svg_file,
+    )
+    _assert_latest_artifact_link(
+        tmp_path / f"{SCHEMATIC_ARTIFACT_STEM}.png",
+        png_file,
+    )
 
 
 def _assert_latest_artifact_link(latest, artifact):

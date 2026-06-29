@@ -1,6 +1,7 @@
 """Render the verified TB6600 stripboard build artifacts."""
 
 import logging
+import shutil
 from pathlib import Path
 
 from mege_circuits.simple import (
@@ -20,15 +21,17 @@ _logger = logging.getLogger(__name__)
 
 try:
     from examples.integration.tb6600_stripboard_interface import (
+        create_tb6600_artifact_staging_dir,
         create_schema_for_tb6600_interface,
-        prepare_tb6600_artifact_outputs,
-        publish_tb6600_latest_artifact_links,
+        prepare_tb6600_artifact_outputs_for_run,
+        publish_tb6600_staged_artifacts,
     )
 except ModuleNotFoundError:
     from tb6600_stripboard_interface import (
+        create_tb6600_artifact_staging_dir,
         create_schema_for_tb6600_interface,
-        prepare_tb6600_artifact_outputs,
-        publish_tb6600_latest_artifact_links,
+        prepare_tb6600_artifact_outputs_for_run,
+        publish_tb6600_staged_artifacts,
     )
 
 
@@ -60,21 +63,32 @@ def render_tb6600_stripboard_projection(output_dir=None, stem=STRIPBOARD_ARTIFAC
             "the integration diagrams directory is reserved for verified build outputs."
         )
     output_dir = Path(output_dir)
-    svg_file, png_file = prepare_tb6600_artifact_outputs(
-        output_dir,
+    run_id, staging_dir = create_tb6600_artifact_staging_dir(output_dir, stem)
+    svg_file, png_file = prepare_tb6600_artifact_outputs_for_run(
+        staging_dir,
         stem,
+        run_id,
     )
-    schema, assignment = create_stripboard_projection()
-    for output_file in (svg_file, png_file):
-        render_stripboard_overlay(
-            assignment.stripboard,
-            assignment,
-            schema,
-            file=output_file,
+    try:
+        schema, assignment = create_stripboard_projection()
+        for output_file in (svg_file, png_file):
+            render_stripboard_overlay(
+                assignment.stripboard,
+                assignment,
+                schema,
+                file=output_file,
+            )
+            _logger.info("Wrote %s", output_file)
+        final_svg, final_png = publish_tb6600_staged_artifacts(
+            output_dir,
+            (svg_file, png_file),
+            staging_dir=staging_dir,
+            prune_stems=(stem,),
         )
-        _logger.info("Wrote %s", output_file)
-    publish_tb6600_latest_artifact_links(svg_file, png_file)
-    return svg_file, png_file
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    return final_svg, final_png
 
 
 def create_tb6600_verified_stripboard_plan():
@@ -100,46 +114,32 @@ def create_tb6600_verified_stripboard_plan():
 
 def render_tb6600_stripboard_build(output_dir=None):
     output_dir = Path(output_dir) if output_dir is not None else DEFAULT_OUTPUT_DIR
-    _clear_tb6600_build_artifacts(output_dir, STRIPBOARD_ARTIFACT_STEM)
-    for obsolete_stem in OBSOLETE_STRIPBOARD_ARTIFACT_STEMS:
-        _clear_tb6600_build_artifacts(output_dir, obsolete_stem)
     _schema, circuit, layout, report = create_tb6600_verified_stripboard_plan()
-    run_id = prepare_tb6600_artifact_outputs(
-        output_dir,
-        STRIPBOARD_ARTIFACT_STEM,
-    )[
-        0
-    ].stem.split("__", 1)[1]
-    outputs = write_stripboard_build_outputs(
-        layout,
-        circuit,
-        output_dir=output_dir,
-        stem=STRIPBOARD_ARTIFACT_STEM,
-        run_id=run_id,
-        report=report,
+    run_id, staging_dir = create_tb6600_artifact_staging_dir(
+        output_dir, STRIPBOARD_ARTIFACT_STEM
     )
-    for artifact in outputs.as_tuple():
-        _logger.debug("Wrote %s", artifact)
-    publish_tb6600_latest_artifact_links(*outputs.as_tuple())
-    return outputs
-
-
-def _clear_tb6600_build_artifacts(output_dir, stem):
-    output_dir.mkdir(parents=True, exist_ok=True)
-    stems = (
-        stem,
-        f"{stem}_bottom",
-        f"{stem}_debug",
-        f"{stem}_checklist",
-        f"{stem}_data",
-    )
-    for artifact_stem in stems:
-        for suffix in (".svg", ".png", ".md", ".json"):
-            latest = output_dir / f"{artifact_stem}{suffix}"
-            if latest.exists() or latest.is_symlink():
-                latest.unlink()
-            for old_artifact in output_dir.glob(f"{artifact_stem}__*{suffix}"):
-                old_artifact.unlink()
+    try:
+        staged_outputs = write_stripboard_build_outputs(
+            layout,
+            circuit,
+            output_dir=staging_dir,
+            stem=STRIPBOARD_ARTIFACT_STEM,
+            run_id=run_id,
+            report=report,
+        )
+        for artifact in staged_outputs.as_tuple():
+            _logger.debug("Wrote %s", artifact)
+        final_artifacts = publish_tb6600_staged_artifacts(
+            output_dir,
+            staged_outputs.as_tuple(),
+            staging_dir=staging_dir,
+            prune_stems=(STRIPBOARD_ARTIFACT_STEM,),
+            obsolete_stems=OBSOLETE_STRIPBOARD_ARTIFACT_STEMS,
+        )
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    return type(staged_outputs)(*final_artifacts)
 
 
 def main():

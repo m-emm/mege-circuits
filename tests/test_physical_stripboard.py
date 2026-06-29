@@ -5,10 +5,13 @@ import pytest
 
 import mege_circuits.physical as physical
 from examples.high_side_switch_v3 import create_high_side_switch
+from examples.integration import tb6600_stripboard_layout as tb6600_layout
 from examples.integration.tb6600_stripboard_interface import (
     create_schema_for_tb6600_interface,
 )
 from examples.integration.tb6600_stripboard_layout import (
+    OBSOLETE_STRIPBOARD_ARTIFACT_STEMS,
+    STRIPBOARD_ARTIFACT_STEM,
     create_tb6600_verified_stripboard_plan,
     render_tb6600_stripboard_build,
 )
@@ -1040,10 +1043,33 @@ def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(tmp_path):
 
 
 def test_tb6600_build_outputs_include_only_verified_artifacts(tmp_path, caplog):
+    old_top_svg = tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}__old.svg"
+    old_top_png = tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}__old.png"
+    old_projection_svg = (
+        tmp_path / f"{OBSOLETE_STRIPBOARD_ARTIFACT_STEMS[0]}__old.svg"
+    )
+    old_projection_latest = tmp_path / f"{OBSOLETE_STRIPBOARD_ARTIFACT_STEMS[0]}.svg"
+    old_top_svg.write_text("old stripboard svg", encoding="utf-8")
+    old_top_png.write_bytes(b"old stripboard png")
+    old_projection_svg.write_text("old projection svg", encoding="utf-8")
+    old_projection_latest.write_text("old projection latest", encoding="utf-8")
+
     with caplog.at_level(logging.INFO):
         outputs = render_tb6600_stripboard_build(tmp_path)
 
     assert all(path.exists() for path in outputs.as_tuple())
+    assert not old_top_svg.exists()
+    assert not old_top_png.exists()
+    assert not old_projection_svg.exists()
+    assert not old_projection_latest.exists()
+    _assert_latest_artifact_link(
+        tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}.svg",
+        outputs.top_svg,
+    )
+    _assert_latest_artifact_link(
+        tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}.png",
+        outputs.top_png,
+    )
     assert (
         outputs.top_svg.read_text(encoding="utf-8").count(
             'class="layout-terminal-hole-label"'
@@ -1085,6 +1111,59 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(tmp_path, caplog):
     )
     assert "Wrote stripboard build artifact" in messages
     assert "verification_ok=True" in messages
+
+
+def test_tb6600_stripboard_failure_preserves_existing_artifacts(tmp_path, monkeypatch):
+    old_top_svg = tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}__old.svg"
+    old_top_png = tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}__old.png"
+    latest_top_svg = tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}.svg"
+    latest_top_png = tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}.png"
+    old_projection_svg = (
+        tmp_path / f"{OBSOLETE_STRIPBOARD_ARTIFACT_STEMS[0]}__old.svg"
+    )
+    old_projection_latest = tmp_path / f"{OBSOLETE_STRIPBOARD_ARTIFACT_STEMS[0]}.svg"
+    old_top_svg.write_text("old stripboard svg", encoding="utf-8")
+    old_top_png.write_bytes(b"old stripboard png")
+    latest_top_svg.write_text("latest stripboard svg", encoding="utf-8")
+    latest_top_png.write_bytes(b"latest stripboard png")
+    old_projection_svg.write_text("old projection svg", encoding="utf-8")
+    old_projection_latest.write_text("old projection latest", encoding="utf-8")
+
+    def fake_plan():
+        return None, object(), object(), object()
+
+    def failing_write(*_args, output_dir, stem, run_id, **_kwargs):
+        partial = output_dir / f"{stem}__{run_id}.svg"
+        partial.write_text("partial new stripboard", encoding="utf-8")
+        raise RuntimeError("stripboard write failed")
+
+    monkeypatch.setattr(tb6600_layout, "create_tb6600_verified_stripboard_plan", fake_plan)
+    monkeypatch.setattr(tb6600_layout, "write_stripboard_build_outputs", failing_write)
+
+    with pytest.raises(RuntimeError, match="stripboard write failed"):
+        tb6600_layout.render_tb6600_stripboard_build(tmp_path)
+
+    assert old_top_svg.read_text(encoding="utf-8") == "old stripboard svg"
+    assert old_top_png.read_bytes() == b"old stripboard png"
+    assert latest_top_svg.read_text(encoding="utf-8") == "latest stripboard svg"
+    assert latest_top_png.read_bytes() == b"latest stripboard png"
+    assert old_projection_svg.read_text(encoding="utf-8") == "old projection svg"
+    assert old_projection_latest.read_text(encoding="utf-8") == "old projection latest"
+    assert not tuple(tmp_path.glob(".tmp_*"))
+    assert tuple(tmp_path.glob(f"{STRIPBOARD_ARTIFACT_STEM}__*.svg")) == (
+        old_top_svg,
+    )
+    assert tuple(tmp_path.glob(f"{STRIPBOARD_ARTIFACT_STEM}__*.png")) == (
+        old_top_png,
+    )
+
+
+def _assert_latest_artifact_link(latest, artifact):
+    assert latest.exists()
+    if latest.is_symlink():
+        assert latest.resolve() == artifact.resolve()
+    else:
+        assert latest.read_bytes() == artifact.read_bytes()
 
 
 def test_verify_stripboard_layout_reports_open_circuit():

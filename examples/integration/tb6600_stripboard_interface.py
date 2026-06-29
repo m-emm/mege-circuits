@@ -1,6 +1,7 @@
 """Render the planned Pico-to-TB6600 stripboard interface schematic."""
 
 import logging
+import os
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -547,49 +548,162 @@ def create_schema_for_tb6600_interface():
 
 
 def prepare_tb6600_artifact_outputs(output_dir, stem):
+    """Return timestamped schematic artifact paths without deleting old outputs."""
+
+    run_id = _new_tb6600_artifact_run_id()
+    return prepare_tb6600_artifact_outputs_for_run(output_dir, stem, run_id)
+
+
+def prepare_tb6600_artifact_outputs_for_run(output_dir, stem, run_id):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    for suffix in (".svg", ".png"):
-        latest = output_dir / f"{stem}{suffix}"
-        if latest.exists() or latest.is_symlink():
-            latest.unlink()
-        for old_artifact in output_dir.glob(f"{stem}__*{suffix}"):
-            old_artifact.unlink()
-
-    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     return (
         output_dir / f"{stem}__{run_id}.svg",
         output_dir / f"{stem}__{run_id}.png",
     )
 
 
+def create_tb6600_artifact_staging_dir(output_dir, stem, run_id=None):
+    """Create a hidden staging directory for one artifact run."""
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    run_id = run_id or _new_tb6600_artifact_run_id()
+    staging_dir = output_dir / f".tmp_{stem}__{run_id}"
+    attempt = 1
+    while staging_dir.exists():
+        staging_dir = output_dir / f".tmp_{stem}__{run_id}_{attempt}"
+        attempt += 1
+    staging_dir.mkdir(parents=True)
+    return run_id, staging_dir
+
+
+def publish_tb6600_staged_artifacts(
+    output_dir,
+    artifacts,
+    *,
+    staging_dir=None,
+    prune_stems=(),
+    obsolete_stems=(),
+):
+    """Publish staged artifacts, then prune old files only after success."""
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    staged_artifacts = tuple(Path(artifact) for artifact in artifacts)
+    final_artifacts = tuple(output_dir / artifact.name for artifact in staged_artifacts)
+    moved_artifacts = []
+
+    try:
+        _validate_tb6600_artifacts(staged_artifacts)
+        for staged_artifact, final_artifact in zip(staged_artifacts, final_artifacts):
+            os.replace(staged_artifact, final_artifact)
+            moved_artifacts.append(final_artifact)
+        publish_tb6600_latest_artifact_links(*final_artifacts)
+        keep = set(final_artifacts)
+        for stem in prune_stems:
+            prune_tb6600_artifacts(output_dir, stem, keep=keep)
+        for stem in obsolete_stems:
+            prune_tb6600_artifacts(output_dir, stem, remove_stable=True)
+        return final_artifacts
+    except Exception:
+        for artifact in moved_artifacts:
+            if artifact.exists() or artifact.is_symlink():
+                artifact.unlink()
+        raise
+    finally:
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+
 def publish_tb6600_latest_artifact_links(*artifacts):
     for artifact in artifacts:
+        artifact = Path(artifact)
         if "__" not in artifact.stem:
             continue
+        _validate_tb6600_artifacts((artifact,))
         stable_stem = artifact.stem.split("__", 1)[0]
         latest = artifact.with_name(f"{stable_stem}{artifact.suffix}")
-        if latest.exists() or latest.is_symlink():
-            latest.unlink()
+        temporary_latest = artifact.with_name(f".{latest.name}.tmp-{artifact.stem}")
+        if temporary_latest.exists() or temporary_latest.is_symlink():
+            temporary_latest.unlink()
         try:
-            latest.symlink_to(artifact.name)
+            temporary_latest.symlink_to(artifact.name)
         except OSError:
-            shutil.copyfile(artifact, latest)
+            if temporary_latest.exists() or temporary_latest.is_symlink():
+                temporary_latest.unlink()
+            shutil.copyfile(artifact, temporary_latest)
+        try:
+            os.replace(temporary_latest, latest)
+        except Exception:
+            if temporary_latest.exists() or temporary_latest.is_symlink():
+                temporary_latest.unlink()
+            raise
         _logger.info("Updated %s -> %s", latest, artifact.name)
+
+
+def prune_tb6600_artifacts(output_dir, stem, *, keep=(), remove_stable=False):
+    output_dir = Path(output_dir)
+    keep_paths = {Path(path) for path in keep}
+    for artifact_stem in _tb6600_artifact_family_stems(stem):
+        for suffix in (".svg", ".png", ".md", ".json"):
+            latest = output_dir / f"{artifact_stem}{suffix}"
+            if remove_stable and (latest.exists() or latest.is_symlink()):
+                latest.unlink()
+            for old_artifact in output_dir.glob(f"{artifact_stem}__*{suffix}"):
+                if old_artifact not in keep_paths:
+                    old_artifact.unlink()
+
+
+def _new_tb6600_artifact_run_id():
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def _tb6600_artifact_family_stems(stem):
+    return (
+        stem,
+        f"{stem}_bottom",
+        f"{stem}_debug",
+        f"{stem}_checklist",
+        f"{stem}_data",
+    )
+
+
+def _validate_tb6600_artifacts(artifacts):
+    for artifact in artifacts:
+        if not artifact.exists():
+            raise FileNotFoundError(
+                f"Expected staged artifact does not exist: {artifact}"
+            )
+        if artifact.stat().st_size <= 0:
+            raise ValueError(f"Expected staged artifact is empty: {artifact}")
 
 
 def render_tb6600_schematic(output_dir=None):
     output_dir = Path(output_dir) if output_dir is not None else DEFAULT_OUTPUT_DIR
-    svg_file, png_file = prepare_tb6600_artifact_outputs(
-        output_dir,
-        SCHEMATIC_ARTIFACT_STEM,
+    run_id, staging_dir = create_tb6600_artifact_staging_dir(
+        output_dir, SCHEMATIC_ARTIFACT_STEM
     )
-    schema = create_schema_for_tb6600_interface()
-    for output_file in (svg_file, png_file):
-        render_schemdraw(schema, file=output_file)
-        _logger.info("Wrote %s", output_file)
-    publish_tb6600_latest_artifact_links(svg_file, png_file)
-    return svg_file, png_file
+    try:
+        svg_file, png_file = prepare_tb6600_artifact_outputs_for_run(
+            staging_dir,
+            SCHEMATIC_ARTIFACT_STEM,
+            run_id,
+        )
+        schema = create_schema_for_tb6600_interface()
+        for output_file in (svg_file, png_file):
+            render_schemdraw(schema, file=output_file)
+            _logger.info("Wrote %s", output_file)
+        final_svg, final_png = publish_tb6600_staged_artifacts(
+            output_dir,
+            (svg_file, png_file),
+            staging_dir=staging_dir,
+            prune_stems=(SCHEMATIC_ARTIFACT_STEM,),
+        )
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    return final_svg, final_png
 
 
 def main():
