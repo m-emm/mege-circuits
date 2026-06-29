@@ -637,6 +637,103 @@ def test_right_relax_moves_connector_to_rightmost_empty_hole_before_cut():
     assert optimized.connectors == (PlacedConnector("J_n", "n", (0, 3), "N"),)
 
 
+def test_optimizer_prunes_redundant_cut_next_to_empty_tail():
+    footprints = (
+        Footprint(
+            name="test_pin",
+            component_kinds=("test_pin",),
+            pins={"pin": (0, 0)},
+            allowed_rotations=(0,),
+        ),
+    )
+    circuit = Circuit(
+        name="redundant_cut",
+        components=(Component("P1", "test_pin", None, (Terminal("pin", "n"),)),),
+        nets=(create_net("n"),),
+    )
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(5, 1),
+        footprints=footprints,
+        placements={"P1": ("test_pin", (0, 0), 0)},
+        cuts=((0, 2),),
+    )
+
+    optimized, report, changed = physical._prune_redundant_cuts(layout, circuit)
+
+    assert changed
+    assert report.ok, report.summary()
+    assert optimized.cuts == ()
+
+
+def test_optimizer_keeps_cut_when_removal_would_short_nets():
+    footprints = (
+        Footprint(
+            name="test_pin",
+            component_kinds=("test_pin",),
+            pins={"pin": (0, 0)},
+            allowed_rotations=(0,),
+        ),
+    )
+    circuit = Circuit(
+        name="required_cut",
+        components=(
+            Component("P1", "test_pin", None, (Terminal("pin", "left"),)),
+            Component("P2", "test_pin", None, (Terminal("pin", "right"),)),
+        ),
+        nets=(create_net("left"), create_net("right")),
+    )
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(5, 1),
+        footprints=footprints,
+        placements={
+            "P1": ("test_pin", (0, 0), 0),
+            "P2": ("test_pin", (0, 4), 0),
+        },
+        cuts=((0, 2),),
+    )
+
+    optimized, report, changed = physical._prune_redundant_cuts(layout, circuit)
+
+    assert not changed
+    assert report.ok, report.summary()
+    assert optimized.cuts == (StripboardCut(row=0, col=2),)
+
+
+def test_optimizer_preserves_fixed_redundant_cut():
+    footprints = (
+        Footprint(
+            name="test_pin",
+            component_kinds=("test_pin",),
+            pins={"pin": (0, 0)},
+            allowed_rotations=(0,),
+        ),
+    )
+    circuit = Circuit(
+        name="fixed_redundant_cut",
+        components=(Component("P1", "test_pin", None, (Terminal("pin", "n"),)),),
+        nets=(create_net("n"),),
+    )
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(5, 1),
+        footprints=footprints,
+        placements={"P1": ("test_pin", (0, 0), 0)},
+        cuts=((0, 2),),
+    )
+
+    optimized, report, changed = physical._prune_redundant_cuts(
+        layout,
+        circuit,
+        fixed_cuts=frozenset(((0, 2),)),
+    )
+
+    assert not changed
+    assert report.ok, report.summary()
+    assert optimized.cuts == (StripboardCut(row=0, col=2),)
+
+
 def test_down_compaction_moves_verified_point_units_down():
     footprints = (
         Footprint(
@@ -996,7 +1093,7 @@ def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(
     assert planning_stats.verified_candidates >= 2 * planning_stats.optimized_candidates
     assert layout.board.width_pitches <= 14
     assert layout.board.height_pitches == 9
-    assert len(layout.cuts) <= 5
+    assert len(layout.cuts) <= 4
     assert len(layout.jumpers) <= 1
     assert physical._left_compaction_cut_blocker_collisions(layout) == frozenset()
     assert all(jumper.net_name != "ena_plus" for jumper in layout.jumpers)
@@ -1104,7 +1201,7 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(
     top_svg = outputs.top_svg.read_text(encoding="utf-8")
     assert data["layout"]["board"]["width_pitches"] <= 14
     assert data["layout"]["board"]["height_pitches"] == 9
-    assert len(data["layout"]["cuts"]) <= 5
+    assert len(data["layout"]["cuts"]) <= 4
     assert len(data["layout"]["jumpers"]) <= 1
     assert all(jumper["net_name"] != "ena_plus" for jumper in data["layout"]["jumpers"])
     assert all(

@@ -1279,6 +1279,40 @@ def _optimize_routed_stripboard_layout(
             fixed_jumpers=fixed_jumper_keys,
         )
 
+        cycle, cycle_report, pruned_cuts = _prune_redundant_cuts(
+            cycle,
+            circuit,
+            fixed_cuts=fixed_cut_holes,
+        )
+        changed = changed or pruned_cuts
+
+        cycle, cycle_report = _left_compact_stripboard_layout(
+            cycle,
+            circuit,
+            trim_margin=trim_margin,
+            locked_refdeses=locked_refdeses,
+            fixed_cuts=fixed_cut_holes,
+            fixed_jumpers=fixed_jumper_keys,
+        )
+
+        cycle, cycle_report, moved_down_after_prune = _down_compact_stripboard_layout(
+            cycle,
+            circuit,
+            locked_refdeses=locked_refdeses,
+            fixed_cuts=fixed_cut_holes,
+            fixed_jumpers=fixed_jumper_keys,
+        )
+        changed = changed or moved_down_after_prune
+
+        cycle, cycle_report = _left_compact_stripboard_layout(
+            cycle,
+            circuit,
+            trim_margin=trim_margin,
+            locked_refdeses=locked_refdeses,
+            fixed_cuts=fixed_cut_holes,
+            fixed_jumpers=fixed_jumper_keys,
+        )
+
         cycle_score = _layout_optimization_score(cycle, circuit, cycle_report)
         if cycle_score < best_score:
             _logger.debug(
@@ -1779,6 +1813,78 @@ def _left_compaction_score(layout):
         _layout_col_sum(layout),
         _layout_jumper_length(layout),
     )
+
+
+def _prune_redundant_cuts(layout, circuit, *, fixed_cuts=frozenset()):
+    current = layout
+    current_report = verify_stripboard_layout(current, circuit)
+    if not current_report.ok:
+        return current, current_report, False
+
+    fixed_cuts = frozenset(fixed_cuts)
+    current_score = _layout_optimization_score(current, circuit, current_report)
+    pruned_count = 0
+    while True:
+        best_candidate = None
+        best_report = None
+        best_score = current_score
+        best_cut = None
+        for index, cut in enumerate(current.cuts):
+            cut_hole = (cut.row, cut.col)
+            if cut_hole in fixed_cuts:
+                continue
+            candidate_cuts = tuple(
+                candidate
+                for cut_index, candidate in enumerate(current.cuts)
+                if cut_index != index
+            )
+            candidate, candidate_report = _rebuild_planned_stripboard_layout(
+                current,
+                circuit,
+                board=current.board,
+                placed_components=current.placed_components,
+                cuts=candidate_cuts,
+                jumpers=current.jumpers,
+                connectors=current.connectors,
+            )
+            if candidate is None or not candidate_report.ok:
+                continue
+            candidate_score = _layout_optimization_score(
+                candidate,
+                circuit,
+                candidate_report,
+            )
+            if candidate_score < best_score:
+                best_candidate = candidate
+                best_report = candidate_report
+                best_score = candidate_score
+                best_cut = cut
+
+        if best_candidate is None:
+            break
+
+        _logger.debug(
+            "Pruned redundant cut row=%s col=%s cuts=%s->%s score=%s->%s",
+            best_cut.row,
+            best_cut.col,
+            len(current.cuts),
+            len(best_candidate.cuts),
+            current_score,
+            best_score,
+        )
+        current = best_candidate
+        current_report = best_report
+        current_score = best_score
+        pruned_count += 1
+
+    if pruned_count:
+        _logger.debug(
+            "Finished redundant cut pruning pruned=%s %s score=%s",
+            pruned_count,
+            _layout_log_summary(current),
+            current_score,
+        )
+    return current, current_report, bool(pruned_count)
 
 
 def _absorb_connector_only_jumpers(layout, circuit, *, fixed_jumper_keys=frozenset()):
