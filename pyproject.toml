@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=69", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mege-circuits"
+dynamic = ["version"]
+description = "Alignment-first Python DSL for circuit schematics and stripboard layout previews."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Markus Emmenegger", email = "markus@emmenegger.net" },
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Manufacturing",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
+dependencies = [
+  "Pillow",
+  "schemdraw",
+]
+
+[project.optional-dependencies]
+testing = [
+  "pytest",
+  "pytest-cov",
+]
+
+[project.urls]
+Homepage = "https://github.com/m-emm/mege-circuits"
+Repository = "https://github.com/m-emm/mege-circuits"
+Issues = "https://github.com/m-emm/mege-circuits/issues"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools_scm]
+fallback_version = "0.1.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
