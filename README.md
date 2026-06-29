@@ -1,14 +1,15 @@
 # mege-circuits
 
 `mege-circuits` is an alignment-first Python DSL for drawing small circuit
-schematics and projecting them onto stripboard-style physical layout previews.
+schematics and projecting them onto diagnostic stripboard-style layout previews.
 
 It grew out of the Ender 3 V3 KE IDEX wiring work, but is now a standalone
 project for reusable circuit drawing, stripboard visualization, and experiments
 around hand-buildable electronics layouts.
 
-Status: early open-source extraction. The public API is useful, tested, and
-still expected to change as the stripboard planner matures.
+Status: early open-source extraction. The schematic API and current
+schematic-to-stripboard projection are useful and tested, but the projection is
+not yet a verified stripboard router or manufacturing plan.
 
 ## Install
 
@@ -65,17 +66,22 @@ python examples/integration/tb6600_stripboard_interface.py
 python examples/integration/tb6600_stripboard_layout.py
 ```
 
-Those scripts render both schematic and stripboard preview artifacts next to the
-example by default. The test suite renders them into temporary directories.
+Those scripts render both schematic and diagnostic stripboard projection
+artifacts next to the example by default. The test suite renders them into
+`examples/integration/diagrams/` as gitignored SVG/PNG files so the latest
+integration output is easy to inspect after changes. Each render uses a unique
+timestamped filename to avoid local preview caches; stable filenames in that
+directory are symlinks to the newest generated artifacts.
 
 ## Documentation
 
 - [DSL guide](docs/dsl-guide.md)
 - [Alignment notes](docs/alignment-based-schemdraw.md)
-- [Stripboard layout engine blueprint](docs/blueprint.md)
+- [Stripboard planning blueprint](docs/blueprint.md)
 
-The blueprint is a draft expansion document and intentionally moved here mostly
-as-is; it will be revised as the standalone project grows.
+The blueprint describes how the current projection path should evolve into a
+netlist-driven, verified stripboard planner while keeping the visualization
+engine.
 
 ## Development
 

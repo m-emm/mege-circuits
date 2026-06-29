@@ -194,6 +194,14 @@ class StripboardBlocker:
 
 @dataclass(frozen=True)
 class StripboardNetAssignment:
+    """Visualization-derived assignment for the legacy stripboard projection.
+
+    This is a diagnostic layout preview model, not a verified physical layout:
+    rows and runs come from schematic net visualizations, while marker columns
+    are chosen for readable overlays. It intentionally does not represent real
+    footprints, jumpers, or extracted conductor connectivity.
+    """
+
     stripboard: Stripboard
     net_visualizations: tuple[SchemaNetVisualization, ...]
     net_rows: dict[str, int]
@@ -583,6 +591,8 @@ def create_schema(node_views, elements, wires=None):
 
 
 def get_schema_net_visualizations(schema):
+    """Collect drawing-derived net points used by the projection preview."""
+
     if not isinstance(schema, Schema):
         raise TypeError("get_schema_net_visualizations expects a Schema object.")
 
@@ -649,6 +659,15 @@ def assign_schema_nets_to_stripboard(
     right_margin_pitches=1,
     column_pitch=1.0,
 ):
+    """Create the legacy schematic-to-stripboard projection assignment.
+
+    The returned `StripboardNetAssignment` is derived from schematic drawing
+    positions: each visible net starts as one horizontal stripboard row, with
+    node and terminal markers snapped to holes. It is a visualization aid and
+    placement hint source, not a routed or electrically verified stripboard
+    layout.
+    """
+
     _validate_nonnegative_integer(left_margin_pitches, "left_margin_pitches")
     _validate_nonnegative_integer(right_margin_pitches, "right_margin_pitches")
     if not isinstance(column_pitch, (int, float)) or isinstance(column_pitch, bool):
@@ -695,11 +714,7 @@ def assign_schema_nets_to_stripboard(
     }
     used_source_columns = tuple(
         sorted(
-            {
-                column
-                for columns in source_columns_by_net.values()
-                for column in columns
-            }
+            {column for columns in source_columns_by_net.values() for column in columns}
         )
     )
     active_width = max(
@@ -733,8 +748,7 @@ def assign_schema_nets_to_stripboard(
     )
     net_column_maps = {
         net_name: {
-            source_column: column_map[source_column]
-            for source_column in source_columns
+            source_column: column_map[source_column] for source_column in source_columns
         }
         for net_name, source_columns in source_columns_by_net.items()
     }
@@ -771,6 +785,13 @@ def compact_sparse_stripboard_rows(
     max_connections_per_sparse_net=3,
     schema=None,
 ):
+    """Compact sparse rows inside a legacy projection assignment.
+
+    This improves the diagnostic overlay by packing low-marker-count nets into
+    cut-separated runs. The cuts are projection artifacts until a future
+    physical-layout verifier can prove a routed board.
+    """
+
     if not isinstance(assignment, StripboardNetAssignment):
         raise TypeError("assignment must be a StripboardNetAssignment.")
     if schema is not None and not isinstance(schema, Schema):
@@ -833,8 +854,7 @@ def _compact_sparse_stripboard_rows_for_net_names(
         for visualization in assignment.net_visualizations
     }
     source_columns_by_net = {
-        run.net_name: tuple(run.source_columns)
-        for run in assignment.net_runs
+        run.net_name: tuple(run.source_columns) for run in assignment.net_runs
     }
     if markers_by_net is None:
         markers_by_net = _stripboard_markers_by_net(
@@ -1013,8 +1033,7 @@ def _sparse_stripboard_candidate_net_names(
             assignment.net_runs,
             key=lambda item: (item.row, item.start_col),
         )
-        if len(markers_by_net.get(run.net_name, ()))
-        <= max_connections_per_sparse_net
+        if len(markers_by_net.get(run.net_name, ())) <= max_connections_per_sparse_net
     )
 
 
@@ -1038,6 +1057,13 @@ def compact_stripboard_connections_left(
     use_component_blockers=True,
     strict=True,
 ):
+    """Move projection markers left while preserving readable overlay geometry.
+
+    The pass chooses marker columns and body blockers for the diagnostic
+    projection. It is not footprint placement and does not establish physical
+    circuit correctness.
+    """
+
     if not isinstance(schema, Schema):
         raise TypeError("compact_stripboard_connections_left expects a Schema object.")
     if not isinstance(assignment, StripboardNetAssignment):
@@ -1076,6 +1102,12 @@ def permute_stripboard_rows_for_element_span(
     max_exact_rows=9,
     beam_width=512,
 ):
+    """Reorder projection rows to reduce visual component spans.
+
+    This keeps all marker columns and shared-row net groupings intact. It is a
+    readability heuristic for the projection preview, not a routing step.
+    """
+
     if not isinstance(schema, Schema):
         raise TypeError(
             "permute_stripboard_rows_for_element_span expects a Schema object."
@@ -1144,8 +1176,7 @@ def _beam_search_stripboard_row_order(
         for partial_order in partial_orders:
             remaining = set(range(row_count)) - set(partial_order)
             candidates.extend(
-                (*partial_order, old_row)
-                for old_row in sorted(remaining)
+                (*partial_order, old_row) for old_row in sorted(remaining)
             )
         partial_orders = sorted(
             candidates,
@@ -1184,10 +1215,7 @@ def _stripboard_row_order_score(
         _stripboard_element_span_weight(element_type) * span
         for _element_name, span, element_type in element_spans
     )
-    movement = sum(
-        abs(old_row - new_row)
-        for new_row, old_row in enumerate(row_order)
-    )
+    movement = sum(abs(old_row - new_row) for new_row, old_row in enumerate(row_order))
     return (
         max(priority_spans, default=0),
         sum(priority_spans),
@@ -1219,10 +1247,7 @@ def _stripboard_row_order_prefix_score(
         _stripboard_element_span_weight(element_type) * span
         for _element_name, span, element_type in element_spans
     )
-    movement = sum(
-        abs(old_row - new_row)
-        for new_row, old_row in enumerate(row_order)
-    )
+    movement = sum(abs(old_row - new_row) for new_row, old_row in enumerate(row_order))
     return (
         max(priority_spans, default=0),
         sum(priority_spans),
@@ -1313,8 +1338,7 @@ def _remap_stripboard_assignment_rows(assignment, old_to_new):
         for index, visualization in enumerate(assignment.net_visualizations)
     }
     net_rows = {
-        net_name: old_to_new[row]
-        for net_name, row in assignment.net_rows.items()
+        net_name: old_to_new[row] for net_name, row in assignment.net_rows.items()
     }
     return replace(
         assignment,
@@ -1330,19 +1354,13 @@ def _remap_stripboard_assignment_rows(assignment, old_to_new):
         net_rows=net_rows,
         net_runs=tuple(
             sorted(
-                (
-                    replace(run, row=old_to_new[run.row])
-                    for run in assignment.net_runs
-                ),
+                (replace(run, row=old_to_new[run.row]) for run in assignment.net_runs),
                 key=lambda run: (run.row, run.start_col, run.net_name),
             )
         ),
         cuts=tuple(
             sorted(
-                (
-                    replace(cut, row=old_to_new[cut.row])
-                    for cut in assignment.cuts
-                ),
+                (replace(cut, row=old_to_new[cut.row]) for cut in assignment.cuts),
                 key=lambda cut: (cut.row, cut.col),
             )
         ),
@@ -1577,6 +1595,14 @@ def render_stripboard(stripboard, file, scale=32):
 
 
 def render_stripboard_overlay(stripboard, assignment, schema, file, scale=32):
+    """Render a diagnostic `StripboardNetAssignment` overlay.
+
+    This renderer remains the supported view for the legacy projection path. It
+    visualizes schematic-derived rows, compacted runs, diagnostic cuts, markers,
+    labels, and body blockers; it does not imply that the layout has been
+    routed or electrically verified.
+    """
+
     if not isinstance(stripboard, Stripboard):
         raise TypeError("render_stripboard_overlay expects a Stripboard object.")
     if not isinstance(assignment, StripboardNetAssignment):
@@ -2300,7 +2326,7 @@ def _svg_stripboard_overlay_label(label):
         f'fill="{STRIPBOARD_OVERLAY_TEXT_FILL}" '
         f'stroke="{STRIPBOARD_OVERLAY_TEXT_HALO}" stroke-width="0.075" '
         f'paint-order="stroke"{transform}>'
-        f'{_svg_text(label.text)}</text>'
+        f"{_svg_text(label.text)}</text>"
     )
 
 
@@ -2707,8 +2733,7 @@ def _best_stripboard_element_placement(
 
     for columns in product(*column_ranges):
         positions = tuple(
-            (entry["row"], column)
-            for entry, column in zip(entries, columns)
+            (entry["row"], column) for entry, column in zip(entries, columns)
         )
         if len(set(positions)) != len(positions):
             continue
@@ -2744,8 +2769,7 @@ def _best_stripboard_element_placement(
             _stripboard_terminal_cluster_score(columns),
             min(columns),
             sum(
-                abs(column - entry["column"])
-                for entry, column in zip(entries, columns)
+                abs(column - entry["column"]) for entry, column in zip(entries, columns)
             ),
             columns,
         )
@@ -2758,10 +2782,7 @@ def _best_stripboard_element_placement(
     if best_columns is None:
         return None
     return (
-        {
-            entry["key"]: column
-            for entry, column in zip(entries, best_columns)
-        },
+        {entry["key"]: column for entry, column in zip(entries, best_columns)},
         best_blockers,
         best_segments,
     )
@@ -2908,9 +2929,8 @@ def _stripboard_hole_xy(hole):
 
 
 def _point_orientation(first, second, third):
-    value = (
-        (second[1] - first[1]) * (third[0] - second[0])
-        - (second[0] - first[0]) * (third[1] - second[1])
+    value = (second[1] - first[1]) * (third[0] - second[0]) - (second[0] - first[0]) * (
+        third[1] - second[1]
     )
     if value == 0:
         return 0
@@ -2918,10 +2938,9 @@ def _point_orientation(first, second, third):
 
 
 def _point_on_segment(first, point, second):
-    return (
-        min(first[0], second[0]) <= point[0] <= max(first[0], second[0])
-        and min(first[1], second[1]) <= point[1] <= max(first[1], second[1])
-    )
+    return min(first[0], second[0]) <= point[0] <= max(first[0], second[0]) and min(
+        first[1], second[1]
+    ) <= point[1] <= max(first[1], second[1])
 
 
 def _stripboard_component_blockers(schema, assignment):
@@ -2949,7 +2968,10 @@ def _stripboard_component_blockers(schema, assignment):
             blockers.append(blocker)
 
     return tuple(
-        sorted(blockers, key=lambda blocker: (blocker.row, blocker.col, blocker.element_name))
+        sorted(
+            blockers,
+            key=lambda blocker: (blocker.row, blocker.col, blocker.element_name),
+        )
     )
 
 
@@ -3066,7 +3088,9 @@ def _snap_source_column_to_stripboard(source_column, net_name, assignment):
 
 def _stripboard_marker_allowed_span(assignment, entry):
     active_start = assignment.left_margin_pitches
-    active_end = assignment.stripboard.width_pitches - assignment.right_margin_pitches - 1
+    active_end = (
+        assignment.stripboard.width_pitches - assignment.right_margin_pitches - 1
+    )
     active_end = max(active_start, active_end)
     for run in assignment.net_runs:
         if run.net_name != entry["net_name"]:
@@ -3118,13 +3142,15 @@ def _trim_stripboard_assignment_width(assignment):
         return assignment
 
     net_runs = tuple(
-        replace(run, end_col=new_width - 1)
-        if (
-            not run.compacted
-            and run.start_col == 0
-            and run.end_col == old_width - 1
+        (
+            replace(run, end_col=new_width - 1)
+            if (
+                not run.compacted
+                and run.start_col == 0
+                and run.end_col == old_width - 1
+            )
+            else run
         )
-        else run
         for run in assignment.net_runs
     )
     column_map = {

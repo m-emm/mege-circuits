@@ -1,16 +1,16 @@
+import pytest
+
+import mege_circuits.dsl as circuit_dsl
 from examples.integration.tb6600_stripboard_interface import (
+    SCHEMATIC_ARTIFACT_STEM,
     create_schema_for_tb6600_interface,
     render_tb6600_schematic,
 )
 from examples.integration.tb6600_stripboard_layout import (
-    create_stripboard_projection,
+    STRIPBOARD_ARTIFACT_STEM,
     render_tb6600_stripboard_projection,
 )
-from examples.voltage_divider import (
-    create_voltage_divider,
-)
-
-import mege_circuits.dsl as circuit_dsl
+from examples.voltage_divider import create_voltage_divider
 from mege_circuits.simple import (
     Alignment,
     BjtNpn,
@@ -24,6 +24,9 @@ from mege_circuits.simple import (
     Wire,
     Zener,
     align,
+    assign_schema_nets_to_stripboard,
+    compact_sparse_stripboard_rows,
+    compact_stripboard_connections_left,
     create_element,
     create_net,
     create_node,
@@ -31,12 +34,9 @@ from mege_circuits.simple import (
     create_schema,
     create_stripboard,
     create_wire,
-    assign_schema_nets_to_stripboard,
-    compact_sparse_stripboard_rows,
-    compact_stripboard_connections_left,
     get_schema_net_visualizations,
-    point_at,
     permute_stripboard_rows_for_element_span,
+    point_at,
     render_schemdraw,
     render_stripboard,
     render_stripboard_overlay,
@@ -44,7 +44,6 @@ from mege_circuits.simple import (
     snap_schema_to_stripboard,
     translate,
 )
-import pytest
 
 
 def test_voltage_divider_schema_has_expected_shape():
@@ -90,16 +89,44 @@ def test_render_schemdraw_writes_png(tmp_path):
     assert outfile.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
-def test_tb6600_integration_examples_render_to_output_dirs(tmp_path):
-    schematic_svg, schematic_png = render_tb6600_schematic(tmp_path / "schematic")
-    stripboard_svg, stripboard_png = render_tb6600_stripboard_projection(
-        tmp_path / "stripboard"
-    )
+def test_tb6600_integration_examples_render_stable_artifacts():
+    schematic_svg, schematic_png = render_tb6600_schematic()
+    stripboard_svg, stripboard_png = render_tb6600_stripboard_projection()
 
     assert "<svg" in schematic_svg.read_text(encoding="utf-8")
     assert schematic_png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     assert "<svg" in stripboard_svg.read_text(encoding="utf-8")
     assert stripboard_png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert schematic_svg.parent == stripboard_svg.parent
+    assert schematic_svg.parent.name == "diagrams"
+    assert schematic_svg.stem.startswith(f"{SCHEMATIC_ARTIFACT_STEM}__")
+    assert schematic_png.stem.startswith(f"{SCHEMATIC_ARTIFACT_STEM}__")
+    assert stripboard_svg.stem.startswith(f"{STRIPBOARD_ARTIFACT_STEM}__")
+    assert stripboard_png.stem.startswith(f"{STRIPBOARD_ARTIFACT_STEM}__")
+    _assert_latest_artifact_link(
+        schematic_svg.parent / f"{SCHEMATIC_ARTIFACT_STEM}.svg",
+        schematic_svg,
+    )
+    _assert_latest_artifact_link(
+        schematic_png.parent / f"{SCHEMATIC_ARTIFACT_STEM}.png",
+        schematic_png,
+    )
+    _assert_latest_artifact_link(
+        stripboard_svg.parent / f"{STRIPBOARD_ARTIFACT_STEM}.svg",
+        stripboard_svg,
+    )
+    _assert_latest_artifact_link(
+        stripboard_png.parent / f"{STRIPBOARD_ARTIFACT_STEM}.png",
+        stripboard_png,
+    )
+
+
+def _assert_latest_artifact_link(latest, artifact):
+    assert latest.exists()
+    if latest.is_symlink():
+        assert latest.resolve() == artifact.resolve()
+    else:
+        assert latest.read_bytes() == artifact.read_bytes()
 
 
 def test_wire_element_renders_without_a_label(tmp_path):
@@ -361,9 +388,7 @@ def _create_duplicate_marker_stripboard_schema():
     other = translate(4, -4)(
         create_node(Dot, "other_node", net=other_net, label="other")
     )
-    resistor = translate(2, -3)(
-        create_element(Resistor, "Rdup", "1k", shared, other)
-    )
+    resistor = translate(2, -3)(create_element(Resistor, "Rdup", "1k", shared, other))
 
     return create_schema([*dense_nodes, shared, other], [resistor])
 
@@ -376,7 +401,9 @@ def _create_nonphysical_junction_stripboard_schema():
         create_node(Dot, "helper", net=net, kind="schematic_junction")
     )
     other = translate(2, -2)(create_node(Dot, "other", net=other_net, label="other"))
-    resistor = translate(1, -1)(create_element(Resistor, "Rhelper", "1k", signal, other))
+    resistor = translate(1, -1)(
+        create_element(Resistor, "Rhelper", "1k", signal, other)
+    )
 
     return create_schema([signal, helper, other], [resistor])
 
@@ -459,9 +486,7 @@ def _create_same_row_element_schema():
     right = translate(4, 0)(
         create_node(Dot, "same_row_right", net=net, kind="schematic_junction")
     )
-    resistor = translate(2, 0)(
-        create_element(Resistor, "Rsame_row", "0R", left, right)
-    )
+    resistor = translate(2, 0)(create_element(Resistor, "Rsame_row", "0R", left, right))
 
     return create_schema([left, right], [resistor])
 
@@ -611,7 +636,9 @@ def test_compact_sparse_stripboard_rows_merges_only_sparse_rows():
     assert dense_run.end_col == compacted.stripboard.width_pitches - 1
 
     sparse_runs = [run for run in compacted.net_runs if run.compacted]
-    assert [(run.net_name, run.row, run.start_col, run.end_col) for run in sparse_runs] == [
+    assert [
+        (run.net_name, run.row, run.start_col, run.end_col) for run in sparse_runs
+    ] == [
         ("sparse_a", 1, 1, 4),
         ("sparse_b", 1, 6, 9),
     ]
@@ -656,10 +683,13 @@ def test_compact_sparse_stripboard_rows_compacts_three_marker_nets_by_default():
     assert two_marker_run.compacted is True
     if two_marker_run.row == three_marker_run.row:
         assert two_marker_run.start_col == three_marker_run.end_col + 2
-        assert StripboardCut(
-            row=three_marker_run.row,
-            col=three_marker_run.end_col + 1,
-        ) in compacted.cuts
+        assert (
+            StripboardCut(
+                row=three_marker_run.row,
+                col=three_marker_run.end_col + 1,
+            )
+            in compacted.cuts
+        )
     else:
         assert two_marker_run.row > three_marker_run.row
 
@@ -707,13 +737,12 @@ def test_compacted_sparse_rows_give_duplicate_markers_separate_holes():
         for node_view in visualization.node_views:
             marker_rows[("node", node_view.name)] = row
         for terminal in visualization.terminal_points:
-            marker_rows[
-                ("terminal", terminal.element_name, terminal.terminal_name)
-            ] = row
+            marker_rows[("terminal", terminal.element_name, terminal.terminal_name)] = (
+                row
+            )
 
     occupied_holes = [
-        (assignment.marker_column_maps[key], marker_rows[key])
-        for key in marker_rows
+        (assignment.marker_column_maps[key], marker_rows[key]) for key in marker_rows
     ]
     assert len(occupied_holes) == len(set(occupied_holes))
 
@@ -752,9 +781,9 @@ def test_left_compaction_uses_component_blockers():
         for node_view in visualization.node_views:
             marker_rows[("node", node_view.name)] = row
         for terminal in visualization.terminal_points:
-            marker_rows[
-                ("terminal", terminal.element_name, terminal.terminal_name)
-            ] = row
+            marker_rows[("terminal", terminal.element_name, terminal.terminal_name)] = (
+                row
+            )
 
     marker_positions = {
         (row, assignment.marker_column_maps[key])
@@ -773,9 +802,7 @@ def test_left_compaction_places_loose_markers_before_elements():
     )
 
     assert assignment.marker_column_maps[("node", "middle_block")] == 1
-    assert (1, 1) not in {
-        (blocker.row, blocker.col) for blocker in assignment.blockers
-    }
+    assert (1, 1) not in {(blocker.row, blocker.col) for blocker in assignment.blockers}
 
 
 def test_left_compaction_places_short_span_elements_before_tall_ones():
@@ -900,9 +927,7 @@ def test_tb6600_strict_stripboard_projection_has_no_terminal_on_body_blocker():
     _schema, assignment = _create_tb6600_strict_assignment()
     marker_positions = _marker_positions_by_key(assignment)
     terminal_positions = {
-        position
-        for key, position in marker_positions.items()
-        if key[0] == "terminal"
+        position for key, position in marker_positions.items() if key[0] == "terminal"
     }
     blocker_positions = {(blocker.row, blocker.col) for blocker in assignment.blockers}
 
@@ -925,10 +950,7 @@ def test_tb6600_body_paths_do_not_cross_other_terminal_holes_or_bodies():
         }
         blockers = circuit_dsl._stripboard_element_blockers_from_terminal_holes(
             element_name,
-            tuple(
-                (row, column)
-                for _terminal_name, row, column in terminal_holes
-            ),
+            tuple((row, column) for _terminal_name, row, column in terminal_holes),
         )
         blocker_positions = {(blocker.row, blocker.col) for blocker in blockers}
         assert blocker_positions.isdisjoint(
@@ -936,10 +958,7 @@ def test_tb6600_body_paths_do_not_cross_other_terminal_holes_or_bodies():
         )
 
         segments = circuit_dsl._stripboard_element_body_segments_from_terminal_holes(
-            tuple(
-                (row, column)
-                for _terminal_name, row, column in terminal_holes
-            ),
+            tuple((row, column) for _terminal_name, row, column in terminal_holes),
         )
         assert not circuit_dsl._stripboard_segments_intersect_any(
             segments,
@@ -952,19 +971,14 @@ def _row_groups(assignment):
     groups = {}
     for net_name, row in assignment.net_rows.items():
         groups.setdefault(row, set()).add(net_name)
-    return tuple(
-        frozenset(net_names)
-        for _row, net_names in sorted(groups.items())
-    )
+    return tuple(frozenset(net_names) for _row, net_names in sorted(groups.items()))
 
 
 def _row_remap_from_net_groups(before, after):
     row_remap = {}
     for before_row in range(before.stripboard.height_pitches):
         net_names = [
-            net_name
-            for net_name, row in before.net_rows.items()
-            if row == before_row
+            net_name for net_name, row in before.net_rows.items() if row == before_row
         ]
         if not net_names:
             row_remap[before_row] = before_row
@@ -986,10 +1000,13 @@ def test_permute_stripboard_rows_reduces_tb6600_priority_transistor_spans():
     strict_holes = _terminal_holes_by_element(schema, strict_assignment)
     permuted_holes = _terminal_holes_by_element(schema, permuted)
 
-    assert max(
-        _terminal_row_span(strict_holes[element_name])
-        for element_name in ("Q1", "Q2", "Q3")
-    ) > 3
+    assert (
+        max(
+            _terminal_row_span(strict_holes[element_name])
+            for element_name in ("Q1", "Q2", "Q3")
+        )
+        > 3
+    )
     assert {
         element_name: _terminal_row_span(permuted_holes[element_name])
         for element_name in ("Q1", "Q2", "Q3")
@@ -1019,12 +1036,8 @@ def test_permute_stripboard_rows_remaps_artifacts_consistently():
         (run.net_name, run.row, run.start_col, run.end_col, run.compacted)
         for run in permuted.net_runs
     }
-    assert {
-        (row_remap[cut.row], cut.col)
-        for cut in strict_assignment.cuts
-    } == {
-        (cut.row, cut.col)
-        for cut in permuted.cuts
+    assert {(row_remap[cut.row], cut.col) for cut in strict_assignment.cuts} == {
+        (cut.row, cut.col) for cut in permuted.cuts
     }
     assert {
         (
@@ -1068,9 +1081,7 @@ def test_tb6600_permuted_projection_has_no_duplicate_marker_holes_or_terminals_o
     _schema, assignment = _create_tb6600_permuted_assignment()
     marker_positions = _marker_positions_by_key(assignment)
     terminal_positions = {
-        position
-        for key, position in marker_positions.items()
-        if key[0] == "terminal"
+        position for key, position in marker_positions.items() if key[0] == "terminal"
     }
     blocker_positions = {(blocker.row, blocker.col) for blocker in assignment.blockers}
 
@@ -1326,9 +1337,7 @@ def test_stripboard_label_collision_resolver_preserves_clear_preferred_position(
         ),
     )
 
-    resolved = circuit_dsl._resolve_stripboard_overlay_label_collisions(
-        (first, second)
-    )
+    resolved = circuit_dsl._resolve_stripboard_overlay_label_collisions((first, second))
 
     assert (resolved[1].x, resolved[1].y) == (2.0, 0.0)
     _assert_no_label_bbox_overlaps(resolved)

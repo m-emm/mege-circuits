@@ -1,11 +1,13 @@
 """Render the planned Pico-to-TB6600 stripboard interface schematic."""
 
+import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 from mege_circuits.simple import *
 
-
 DEFAULT_OUTPUT_DIR = Path(__file__).with_name("diagrams")
+SCHEMATIC_ARTIFACT_STEM = "pico_tb6600_stripboard_interface"
 
 
 TRANSISTOR_TYPE = "BC337"
@@ -93,7 +95,9 @@ def create_rails(nets):
         RAIL_LENGTH,
         anchor=Alignment.LEFT,
     )
-    gnd_rail = align(gnd_rail, v5_rail, Alignment.STACK_BOTTOM, stack_gap=RAIL_TO_RAIL_GAP)
+    gnd_rail = align(
+        gnd_rail, v5_rail, Alignment.STACK_BOTTOM, stack_gap=RAIL_TO_RAIL_GAP
+    )
     gnd_rail = align(
         point_at(gnd_rail, Alignment.LEFT),
         point_at(v5_rail, Alignment.LEFT),
@@ -273,7 +277,9 @@ def create_enable_channel(terminals, nets, gnd_rail):
         collector=ena_plus_junction,
         emitter=gnd_junction,
     )
-    transistor = align(transistor.collector, ena_plus_junction, Alignment.CENTER, axes=["x"])
+    transistor = align(
+        transistor.collector, ena_plus_junction, Alignment.CENTER, axes=["x"]
+    )
     transistor = align(
         transistor.collector,
         ena_plus_junction,
@@ -537,15 +543,49 @@ def create_schema_for_tb6600_interface():
     return create_schema(nodes, elements)
 
 
+def prepare_tb6600_artifact_outputs(output_dir, stem):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for suffix in (".svg", ".png"):
+        latest = output_dir / f"{stem}{suffix}"
+        if latest.exists() or latest.is_symlink():
+            latest.unlink()
+        for old_artifact in output_dir.glob(f"{stem}__*{suffix}"):
+            old_artifact.unlink()
+
+    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    return (
+        output_dir / f"{stem}__{run_id}.svg",
+        output_dir / f"{stem}__{run_id}.png",
+    )
+
+
+def publish_tb6600_latest_artifact_links(*artifacts):
+    for artifact in artifacts:
+        if "__" not in artifact.stem:
+            continue
+        stable_stem = artifact.stem.split("__", 1)[0]
+        latest = artifact.with_name(f"{stable_stem}{artifact.suffix}")
+        if latest.exists() or latest.is_symlink():
+            latest.unlink()
+        try:
+            latest.symlink_to(artifact.name)
+        except OSError:
+            shutil.copyfile(artifact, latest)
+        print(f"Updated {latest} -> {artifact.name}")
+
+
 def render_tb6600_schematic(output_dir=None):
     output_dir = Path(output_dir) if output_dir is not None else DEFAULT_OUTPUT_DIR
-    output_dir.mkdir(parents=True, exist_ok=True)
-    svg_file = output_dir / "pico_tb6600_stripboard_interface.svg"
-    png_file = output_dir / "pico_tb6600_stripboard_interface.png"
+    svg_file, png_file = prepare_tb6600_artifact_outputs(
+        output_dir,
+        SCHEMATIC_ARTIFACT_STEM,
+    )
     schema = create_schema_for_tb6600_interface()
     for output_file in (svg_file, png_file):
         render_schemdraw(schema, file=output_file)
         print(f"Wrote {output_file}")
+    publish_tb6600_latest_artifact_links(svg_file, png_file)
     return svg_file, png_file
 
 

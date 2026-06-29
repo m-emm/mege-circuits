@@ -54,5 +54,6 @@ venv/
 .mypy_cache/
 
 # Example render outputs are reproducible.
+examples/integration/diagrams/
 examples/**/*.svg
 examples/**/*.png

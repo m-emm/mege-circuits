@@ -1,4 +1,4 @@
-"""Render a first stripboard-row projection of the TB6600 interface schematic."""
+"""Render the diagnostic stripboard projection of the TB6600 interface."""
 
 from pathlib import Path
 
@@ -9,15 +9,23 @@ from mege_circuits.simple import (
     permute_stripboard_rows_for_element_span,
     render_stripboard_overlay,
 )
+
 try:
     from examples.integration.tb6600_stripboard_interface import (
         create_schema_for_tb6600_interface,
+        prepare_tb6600_artifact_outputs,
+        publish_tb6600_latest_artifact_links,
     )
 except ModuleNotFoundError:
-    from tb6600_stripboard_interface import create_schema_for_tb6600_interface
+    from tb6600_stripboard_interface import (
+        create_schema_for_tb6600_interface,
+        prepare_tb6600_artifact_outputs,
+        publish_tb6600_latest_artifact_links,
+    )
 
 
 DEFAULT_OUTPUT_DIR = Path(__file__).with_name("diagrams")
+STRIPBOARD_ARTIFACT_STEM = "pico_tb6600_stripboard_interface_stripboard"
 
 
 def create_stripboard_projection():
@@ -35,9 +43,10 @@ def create_stripboard_projection():
 
 def render_tb6600_stripboard_projection(output_dir=None):
     output_dir = Path(output_dir) if output_dir is not None else DEFAULT_OUTPUT_DIR
-    output_dir.mkdir(parents=True, exist_ok=True)
-    svg_file = output_dir / "pico_tb6600_stripboard_interface_stripboard.svg"
-    png_file = output_dir / "pico_tb6600_stripboard_interface_stripboard.png"
+    svg_file, png_file = prepare_tb6600_artifact_outputs(
+        output_dir,
+        STRIPBOARD_ARTIFACT_STEM,
+    )
     schema, assignment = create_stripboard_projection()
     for output_file in (svg_file, png_file):
         render_stripboard_overlay(
@@ -47,6 +56,7 @@ def render_tb6600_stripboard_projection(output_dir=None):
             file=output_file,
         )
         print(f"Wrote {output_file}")
+    publish_tb6600_latest_artifact_links(svg_file, png_file)
     return svg_file, png_file
 
 

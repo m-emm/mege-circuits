@@ -6,9 +6,9 @@ ShellForgePy geometry scripts in this repository: create nets, visual net
 views, and elements; place the views and elements with `align`, `translate`,
 and `rotate`; then render the resulting schema.
 
-Use it for lightweight circuit diagrams, stripboard previews, and reusable
-electronics layout experiments. Connector pin maps and harness views are out
-of scope for this package.
+Use it for lightweight circuit diagrams, diagnostic stripboard projection
+previews, and reusable electronics layout experiments. Connector pin maps and
+harness views are out of scope for this package.
 
 ## Quick Start
 
@@ -54,10 +54,11 @@ render_schemdraw(schema, file=Path("voltage_divider.png"))
 
 ## Stripboard Renderer
 
-The package also includes a small stripboard renderer for physical board
-planning. This is separate from schematic `Schema` rendering: it draws the
+The package also includes a small stripboard renderer for bare board
+visualization. This is separate from schematic `Schema` rendering: it draws the
 bare board, horizontal copper strips, and holes only. Components, strip cuts,
-and net-aware placement are intentionally left for later passes.
+and net-aware placement are handled by the diagnostic overlay path below, not
+by the bare board renderer.
 
 ```python
 from pathlib import Path
@@ -76,14 +77,15 @@ is not implemented yet.
 
 ## Schematic To Stripboard Projection
 
-There is also a first diagnostic bridge from a logical schematic to a
-stripboard preview. It reads the visible positions of every net in a `Schema`,
-sorts those nets by schematic y coordinate, assigns one full horizontal strip
-to each net, then overlays snapped node and terminal markers onto the hole
-grid. The board projection maps the schematic top to the first stripboard row,
-so a bottom ground rail stays at the bottom of the rendered stripboard.
-Horizontally, only columns with snapped schematic node or terminal markers are
-kept; empty runs of holes between used columns are removed.
+There is also a diagnostic bridge from a logical schematic to a stripboard
+projection preview. This path is intentionally visualization-derived: it reads
+the visible positions of every net in a `Schema`, sorts those nets by schematic
+y coordinate, assigns one full horizontal strip to each net, then overlays
+snapped node and terminal markers onto the hole grid. The board projection maps
+the schematic top to the first stripboard row, so a bottom ground rail stays at
+the bottom of the rendered stripboard. Horizontally, only columns with snapped
+schematic node or terminal markers are kept; empty runs of holes between used
+columns are removed.
 
 Sparse rows can be compacted as a second pass. This keeps the initial
 one-net-per-row assignment intact, then merges rows with few connections into
@@ -117,9 +119,11 @@ assignment = permute_stripboard_rows_for_element_span(
 )
 ```
 
-This is a layout aid, not an autorouter. It can show diagnostic strip cuts for
-compacted runs, but it does not yet place real component footprints, jumpers,
-or manufacturing-ready cut instructions.
+This is a visual layout aid, not an autorouter or verified manufacturing plan.
+It can show diagnostic strip cuts for compacted runs, avoid many marker/body
+collisions, and produce useful build-thinking previews, but it does not yet
+place real component footprints, route jumpers, extract physical connectivity,
+or prove the board matches the intended circuit netlist.
 
 ```python
 schema = create_voltage_divider()

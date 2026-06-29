@@ -1,4 +1,4 @@
-"""Compact import surface for alignment-based schematic scripts."""
+"""Compact import surface for schematic and diagnostic stripboard scripts."""
 
 from mege_circuits.dsl import (
     Alignment,
@@ -34,8 +34,8 @@ from mege_circuits.dsl import (
     create_wire,
     get_schema_net_visualizations,
     modify_label_alignment,
-    point_at,
     permute_stripboard_rows_for_element_span,
+    point_at,
     render_schemdraw,
     render_stripboard,
     render_stripboard_overlay,

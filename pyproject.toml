@@ -50,3 +50,11 @@ fallback_version = "0.1.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.black]
+line-length = 88
+target-version = ["py311", "py312"]
+
+[tool.isort]
+profile = "black"
+known_first_party = ["mege_circuits"]
