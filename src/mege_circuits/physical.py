@@ -1047,17 +1047,13 @@ def _append_svg_debug_conductors(lines, physical_netlist):
 
 def _append_svg_debug_jumpers(lines, layout):
     for jumper in layout.jumpers:
-        start = dsl._stripboard_hole_position(jumper.start)
-        end = dsl._stripboard_hole_position(jumper.end)
-        lines.append(
-            f'  <line class="debug-jumper" data-net="{dsl._svg_attr(jumper.net_name)}" '
-            f'data-start-row="{jumper.start[0]}" data-start-col="{jumper.start[1]}" '
-            f'data-end-row="{jumper.end[0]}" data-end-col="{jumper.end[1]}" '
-            f'x1="{start[0]:.3f}" y1="{start[1]:.3f}" '
-            f'x2="{end[0]:.3f}" y2="{end[1]:.3f}" '
-            f'stroke="{dsl.STRIPBOARD_OVERLAY_NODE_FILL}" '
-            f'stroke-width="0.115" stroke-linecap="round" '
-            f'stroke-dasharray="0.180 0.110"/>'
+        _append_svg_jumper_wire(
+            lines,
+            jumper,
+            class_name="debug-jumper",
+            stroke=dsl.STRIPBOARD_OVERLAY_NODE_FILL,
+            stroke_width=0.115,
+            stroke_dasharray="0.180 0.110",
         )
 
 
@@ -1105,10 +1101,7 @@ def _render_stripboard_debug_png(layout, circuit, report, path, scale):
     jumper_width = max(1, int(round(0.115 * scale)))
     for jumper in layout.jumpers:
         draw.line(
-            [
-                dsl._px_point(dsl._stripboard_hole_position(jumper.start), scale),
-                dsl._px_point(dsl._stripboard_hole_position(jumper.end), scale),
-            ],
+            [dsl._px_point(point, scale) for point in _jumper_display_points(jumper)],
             fill=dsl.STRIPBOARD_OVERLAY_NODE_FILL,
             width=jumper_width,
         )
@@ -1131,6 +1124,16 @@ def _bottom_hole_position(board, hole):
         dsl.STRIPBOARD_BOARD_MARGIN + (board.width_pitches - 1 - col),
         dsl.STRIPBOARD_BOARD_MARGIN + row,
     )
+
+
+def _jumper_display_points(jumper):
+    start = dsl._stripboard_hole_position(jumper.start)
+    end = dsl._stripboard_hole_position(jumper.end)
+    if jumper.start[0] != jumper.end[0]:
+        return (start, end)
+
+    lane_y = start[1] + (0.5 if jumper.start[0] == 0 else -0.5)
+    return (start, (start[0], lane_y), (end[0], lane_y), end)
 
 
 def _conductor_row_segments(holes):
@@ -3004,17 +3007,12 @@ def _append_svg_layout_cuts(lines, cuts):
 
 def _append_svg_layout_jumpers(lines, jumpers):
     for jumper in jumpers:
-        start = dsl._stripboard_hole_position(jumper.start)
-        end = dsl._stripboard_hole_position(jumper.end)
-        lines.append(
-            f'  <line class="layout-jumper" data-net="{dsl._svg_attr(jumper.net_name)}" '
-            f'data-start-row="{jumper.start[0]}" data-start-col="{jumper.start[1]}" '
-            f'data-end-row="{jumper.end[0]}" data-end-col="{jumper.end[1]}" '
-            f'x1="{start[0]:.3f}" y1="{start[1]:.3f}" '
-            f'x2="{end[0]:.3f}" y2="{end[1]:.3f}" '
-            f'stroke="{LAYOUT_JUMPER_STROKE}" '
-            f'stroke-width="{LAYOUT_JUMPER_STROKE_WIDTH:.3f}" '
-            f'stroke-linecap="round"/>'
+        _append_svg_jumper_wire(
+            lines,
+            jumper,
+            class_name="layout-jumper",
+            stroke=LAYOUT_JUMPER_STROKE,
+            stroke_width=LAYOUT_JUMPER_STROKE_WIDTH,
         )
         for row, col in (jumper.start, jumper.end):
             x, y = dsl._stripboard_hole_position((row, col))
@@ -3028,6 +3026,48 @@ def _append_svg_layout_jumpers(lines, jumpers):
                 f'stroke="{LAYOUT_JUMPER_STROKE}" '
                 f'stroke-width="{LAYOUT_JUMPER_STROKE_WIDTH:.3f}"/>'
             )
+
+
+def _append_svg_jumper_wire(
+    lines,
+    jumper,
+    *,
+    class_name,
+    stroke,
+    stroke_width,
+    stroke_dasharray=None,
+):
+    data_attrs = (
+        f'class="{class_name}" '
+        f'data-net="{dsl._svg_attr(jumper.net_name)}" '
+        f'data-start-row="{jumper.start[0]}" data-start-col="{jumper.start[1]}" '
+        f'data-end-row="{jumper.end[0]}" data-end-col="{jumper.end[1]}"'
+    )
+    dash_attr = (
+        "" if stroke_dasharray is None else f' stroke-dasharray="{stroke_dasharray}"'
+    )
+    points = _jumper_display_points(jumper)
+    if len(points) == 2:
+        start, end = points
+        lines.append(
+            f"  <line {data_attrs} "
+            f'x1="{start[0]:.3f}" y1="{start[1]:.3f}" '
+            f'x2="{end[0]:.3f}" y2="{end[1]:.3f}" '
+            f'stroke="{stroke}" stroke-width="{stroke_width:.3f}" '
+            f'stroke-linecap="round"{dash_attr}/>'
+        )
+        return
+
+    lines.append(
+        f'  <polyline {data_attrs} data-shape="elbow" '
+        f'points="{_svg_points(points)}" fill="none" '
+        f'stroke="{stroke}" stroke-width="{stroke_width:.3f}" '
+        f'stroke-linecap="round" stroke-linejoin="round"{dash_attr}/>'
+    )
+
+
+def _svg_points(points):
+    return " ".join(f"{x:.3f},{y:.3f}" for x, y in points)
 
 
 def _append_svg_layout_component_segments(lines, overlays):
@@ -3162,22 +3202,20 @@ def _render_stripboard_layout_png(layout, circuit, path, scale, detail):
     jumper_width = max(1, int(round(LAYOUT_JUMPER_STROKE_WIDTH * scale)))
     jumper_endpoint_width = max(1, int(round(LAYOUT_JUMPER_STROKE_WIDTH * scale)))
     for jumper in layout.jumpers:
-        start = dsl._offset_point(
-            dsl._stripboard_hole_position(jumper.start),
-            label_margin,
-            0,
-        )
-        end = dsl._offset_point(
-            dsl._stripboard_hole_position(jumper.end),
-            label_margin,
-            0,
-        )
         draw.line(
-            [dsl._px_point(start, scale), dsl._px_point(end, scale)],
+            [
+                dsl._px_point(dsl._offset_point(point, label_margin, 0), scale)
+                for point in _jumper_display_points(jumper)
+            ],
             fill=LAYOUT_JUMPER_STROKE,
             width=jumper_width,
         )
-        for center in (start, end):
+        for hole in (jumper.start, jumper.end):
+            center = dsl._offset_point(
+                dsl._stripboard_hole_position(hole),
+                label_margin,
+                0,
+            )
             draw.ellipse(
                 dsl._px_rect(
                     center[0] - LAYOUT_JUMPER_ENDPOINT_RADIUS,

@@ -35,6 +35,7 @@ from mege_circuits.simple import (
     score_stripboard_layout,
     stripboard_hints_from_schema,
     verify_stripboard_layout,
+    write_stripboard_build_json,
     write_stripboard_build_outputs,
 )
 
@@ -161,6 +162,43 @@ def test_render_stripboard_layout_writes_svg_and_png(tmp_path):
     annotated_svg = annotated_path.read_text(encoding="utf-8")
     assert 'class="layout-blocker"' in annotated_svg
     assert 'class="layout-terminal-hole-label"' not in annotated_svg
+
+
+def test_render_stripboard_layout_elbows_same_row_jumpers_without_data_waypoints(
+    tmp_path,
+):
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(12, 2),
+        placements={
+            "R1": ((0, 0), 0),
+            "R2": ((0, 8), 0),
+        },
+        cuts=((0, 2), (0, 5), (0, 10)),
+        jumpers=(((0, 4), (0, 6), "midpoint"),),
+    )
+    report = verify_stripboard_layout(layout, circuit)
+    assert report.ok, report.summary()
+
+    svg_path = tmp_path / "same_row_jumper.svg"
+    data_path = tmp_path / "same_row_jumper.json"
+    render_stripboard_layout(layout, circuit, file=svg_path)
+    write_stripboard_build_json(layout, circuit, report, file=data_path)
+
+    svg = svg_path.read_text(encoding="utf-8")
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+
+    assert '<polyline class="layout-jumper" data-net="midpoint"' in svg
+    assert 'data-shape="elbow"' in svg
+    assert svg.count('class="layout-jumper-endpoint"') == 2
+    points = svg.split('class="layout-jumper"', 1)[1].split('points="', 1)[1]
+    assert len(points.split('"', 1)[0].split()) == 4
+    assert data["layout"]["jumpers"] == [
+        {"end": [0, 6], "net_name": "midpoint", "start": [0, 4]}
+    ]
+    assert "points" not in data["layout"]["jumpers"][0]
+    assert "waypoints" not in data["layout"]["jumpers"][0]
 
 
 def test_extract_physical_netlist_and_verification_pass_for_connected_layout():
@@ -369,6 +407,7 @@ def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(tmp_path):
     assert svg.count('class="layout-terminal-hole-label"') == len(directional_pins)
     assert 'class="layout-pin-label"' not in svg
     assert 'class="layout-jumper-endpoint"' in svg
+    assert 'data-shape="elbow"' in svg
     assert 'class="layout-component-body"' in svg
     assert svg.index('class="layout-component"') < svg.index(
         'class="layout-component-body-label"'
