@@ -23,6 +23,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
 ]
 dependencies = [
+  "matplotlib",
   "Pillow",
   "schemdraw",
 ]

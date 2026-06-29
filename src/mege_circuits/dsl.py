@@ -1490,6 +1490,9 @@ def modify_label_alignment(element, alignment):
 
 
 def render_schemdraw(schema, file, show=False):
+    if Path(file).suffix.lower() != ".svg":
+        schemdraw.use("matplotlib")
+
     node_views_by_name = _node_views_by_name(schema.node_views)
     node_points = _schema_node_points(schema, node_views_by_name)
     rail_taps = {
