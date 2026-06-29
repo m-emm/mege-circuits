@@ -16,8 +16,11 @@ ERROR = "error"
 WARNING = "warning"
 LAYOUT_JUMPER_STROKE = "#dc2626"
 LAYOUT_JUMPER_STROKE_WIDTH = 0.055
+LAYOUT_JUMPER_ENDPOINT_RADIUS = 0.115
+LAYOUT_JUMPER_ENDPOINT_FILL = "#ffffff"
 LAYOUT_COMPONENT_BODY_FILL = "#111827"
 LAYOUT_COMPONENT_BODY_LABEL_FILL = "#ffffff"
+DIRECTIONAL_TERMINAL_LABEL_KINDS = frozenset(("bjt_npn", "pmos", "zener"))
 
 
 @dataclass(frozen=True)
@@ -580,6 +583,7 @@ def plan_stripboard(
     best_layout = None
     best_report = None
     best_score = None
+    last_routing_error = None
     for planned, placement_score in planned_states:
         generated_cuts, cut_error = _routing_conflict_cuts(
             circuit,
@@ -607,9 +611,15 @@ def plan_stripboard(
             report = base_report
             layout = base_layout
         else:
-            generated_jumpers = _routing_connectivity_jumpers(
-                base_report.physical_netlist
-            )
+            try:
+                generated_jumpers = _routing_connectivity_jumpers(
+                    base_layout,
+                    circuit,
+                    base_report.physical_netlist,
+                )
+            except ValueError as error:
+                last_routing_error = str(error)
+                continue
             try:
                 layout = create_manual_stripboard_layout(
                     circuit,
@@ -636,7 +646,7 @@ def plan_stripboard(
     if best_layout is not None:
         return best_layout, best_report
     return None, _routing_failure_report(
-        "No verified stripboard routing candidate could be built."
+        last_routing_error or "No verified stripboard routing candidate could be built."
     )
 
 
@@ -1889,10 +1899,11 @@ def _routing_report_has_unfixable_errors(report):
     return any(issue.code != "open_circuit" for issue in report.errors)
 
 
-def _routing_connectivity_jumpers(physical_netlist):
+def _routing_connectivity_jumpers(layout, circuit, physical_netlist):
     if physical_netlist is None:
         return ()
     jumpers = []
+    reserved_holes = _reserved_jumper_endpoint_holes(layout, circuit)
     conductors_by_net = {}
     for conductor in physical_netlist.conductors:
         for net_name in conductor.net_names:
@@ -1909,31 +1920,82 @@ def _routing_connectivity_jumpers(physical_netlist):
                 -conductor.index,
             ),
         )
-        for conductor in conductors:
-            if conductor.index == anchor.index:
-                continue
-            start, end = _shortest_conductor_pin_link(anchor, conductor, net_name)
+        connected = [anchor]
+        remaining = [
+            conductor for conductor in conductors if conductor.index != anchor.index
+        ]
+        while remaining:
+            start, end, conductor = _shortest_conductor_empty_hole_link(
+                connected,
+                remaining,
+                net_name,
+                reserved_holes,
+            )
             jumpers.append(Jumper(start=start, end=end, net_name=net_name))
+            reserved_holes.update((start, end))
+            connected.append(conductor)
+            remaining = [
+                remaining_conductor
+                for remaining_conductor in remaining
+                if remaining_conductor.index != conductor.index
+            ]
     return tuple(jumpers)
+
+
+def _reserved_jumper_endpoint_holes(layout, circuit):
+    return (
+        {pin.hole for pin in placed_component_pins(layout, circuit)}
+        | {(cut.row, cut.col) for cut in layout.cuts}
+        | {(blocker.row, blocker.col) for blocker in layout.blockers}
+        | {hole for jumper in layout.jumpers for hole in (jumper.start, jumper.end)}
+    )
 
 
 def _conductor_pins_for_net(conductor, net_name):
     return tuple(pin for pin in conductor.pins if pin.net_name == net_name)
 
 
-def _shortest_conductor_pin_link(anchor, conductor, net_name):
-    anchor_pins = _conductor_pins_for_net(anchor, net_name)
-    conductor_pins = _conductor_pins_for_net(conductor, net_name)
-    if not anchor_pins or not conductor_pins:
-        raise ValueError(f"Cannot route jumper for net {net_name!r}; no pins found.")
-    return min(
-        (
-            (pin.hole, anchor_pin.hole)
-            for pin in conductor_pins
-            for anchor_pin in anchor_pins
-        ),
-        key=lambda holes: _hole_distance(holes[0], holes[1]),
-    )
+def _shortest_conductor_empty_hole_link(
+    connected,
+    remaining,
+    net_name,
+    reserved_holes,
+):
+    candidates = []
+    for conductor in remaining:
+        conductor_holes = _available_conductor_jumper_holes(conductor, reserved_holes)
+        if not conductor_holes:
+            continue
+        for connected_conductor in connected:
+            connected_holes = _available_conductor_jumper_holes(
+                connected_conductor,
+                reserved_holes,
+            )
+            if not connected_holes:
+                continue
+            for start in conductor_holes:
+                for end in connected_holes:
+                    candidates.append(
+                        (
+                            _hole_distance(start, end),
+                            conductor.index,
+                            connected_conductor.index,
+                            start,
+                            end,
+                            conductor,
+                        )
+                    )
+    if not candidates:
+        raise ValueError(
+            f"Cannot route jumper for net {net_name!r}; no empty jumper endpoint "
+            "holes are available on the disconnected conductors."
+        )
+    _distance, _from_index, _to_index, start, end, conductor = min(candidates)
+    return start, end, conductor
+
+
+def _available_conductor_jumper_holes(conductor, reserved_holes):
+    return tuple(hole for hole in conductor.holes if hole not in reserved_holes)
 
 
 def _routing_layout_score(layout, report, placement_score):
@@ -1998,10 +2060,15 @@ def _absolute_footprint_holes(placed_component, footprint):
 
 
 def _first_cut_column_between(left_col, right_col, pin_columns):
-    for cut_col in range(left_col + 1, right_col):
-        if cut_col not in pin_columns:
-            return cut_col
-    return None
+    candidates = tuple(
+        cut_col
+        for cut_col in range(left_col + 1, right_col)
+        if cut_col not in pin_columns
+    )
+    if not candidates:
+        return None
+    middle = (left_col + right_col) / 2
+    return min(candidates, key=lambda cut_col: (abs(cut_col - middle), cut_col))
 
 
 def _dedupe_cuts(cuts):
@@ -2098,13 +2165,13 @@ def _physical_layout_drc_issues(layout, circuit):
     )
     issues.extend(pin_issues)
 
-    cut_holes = _valid_cut_holes(layout, issues)
-    _check_jumpers(layout, circuit, issues)
     blockers = _valid_blockers(
         (*layout.blockers, *generated_blockers),
         layout.board,
         issues,
     )
+    cut_holes = _valid_cut_holes(layout, issues)
+    _check_jumpers(layout, circuit, cut_holes, pins, blockers, issues)
     _check_pin_hole_collisions(pins, issues)
     _check_pins_on_cuts(pins, cut_holes, issues)
     _check_blocker_pin_collisions(blockers, pins, issues)
@@ -2351,8 +2418,10 @@ def _valid_cut_holes(layout, issues):
     return cut_holes
 
 
-def _check_jumpers(layout, circuit, issues):
+def _check_jumpers(layout, circuit, cut_holes, pins, blockers, issues):
     net_names = {net.name for net in circuit.nets}
+    pin_holes = {pin.hole for pin in pins}
+    blocker_holes = {(blocker.row, blocker.col) for blocker in blockers}
     for jumper in layout.jumpers:
         if not isinstance(jumper, Jumper):
             issues.append(
@@ -2380,6 +2449,46 @@ def _check_jumpers(layout, circuit, issues):
                         ERROR,
                         "jumper_outside_board",
                         f"Jumper {label} endpoint {hole} is outside the board.",
+                        subject=jumper.net_name,
+                        holes=(hole,),
+                    )
+                )
+                continue
+            if hole in pin_holes:
+                issues.append(
+                    PhysicalIssue(
+                        ERROR,
+                        "jumper_on_component_pin",
+                        (
+                            f"Jumper {label} endpoint {hole} for net "
+                            f"{jumper.net_name!r} shares a component pin hole."
+                        ),
+                        subject=jumper.net_name,
+                        holes=(hole,),
+                    )
+                )
+            if hole in blocker_holes:
+                issues.append(
+                    PhysicalIssue(
+                        ERROR,
+                        "jumper_on_blocker",
+                        (
+                            f"Jumper {label} endpoint {hole} for net "
+                            f"{jumper.net_name!r} shares a component body hole."
+                        ),
+                        subject=jumper.net_name,
+                        holes=(hole,),
+                    )
+                )
+            if hole in cut_holes:
+                issues.append(
+                    PhysicalIssue(
+                        ERROR,
+                        "jumper_on_cut",
+                        (
+                            f"Jumper {label} endpoint {hole} for net "
+                            f"{jumper.net_name!r} shares a strip cut hole."
+                        ),
                         subject=jumper.net_name,
                         holes=(hole,),
                     )
@@ -2780,6 +2889,24 @@ def _validate_layout_geometry(layout, circuit, footprint_map):
                 f"{pin.refdes}.{pin.terminal_name} at {(blocker.row, blocker.col)}."
             )
 
+    blocker_holes = {(blocker.row, blocker.col) for blocker in layout.blockers}
+    for jumper in layout.jumpers:
+        for label, hole in (("start", jumper.start), ("end", jumper.end)):
+            if hole in pin_holes:
+                pin = pin_holes[hole]
+                raise ValueError(
+                    f"Jumper {label} endpoint {hole} shares component pin "
+                    f"{pin.refdes}.{pin.terminal_name}."
+                )
+            if hole in blocker_holes:
+                raise ValueError(
+                    f"Jumper {label} endpoint {hole} shares a component body blocker."
+                )
+            if hole in cut_holes:
+                raise ValueError(
+                    f"Jumper {label} endpoint {hole} shares a strip cut hole."
+                )
+
     for placed_component in layout.placed_components:
         _require_footprint(footprint_map, placed_component.footprint_name)
 
@@ -2819,11 +2946,16 @@ def _render_stripboard_layout_svg(layout, circuit, path, scale, detail):
     _append_svg_board(lines, layout.board)
     _append_svg_layout_cuts(lines, layout.cuts)
     _append_svg_layout_jumpers(lines, layout.jumpers)
-    _append_svg_layout_components(lines, layout, circuit, pins, detail)
+    overlays = _layout_component_overlays(layout, circuit, pins)
+    _append_svg_layout_component_segments(lines, overlays)
+    if detail == "assembly":
+        _append_svg_layout_component_bodies(lines, overlays)
     if detail == "annotated":
         _append_svg_layout_blockers(lines, layout.blockers)
     _append_svg_layout_pins(lines, pins)
-    _append_svg_layout_terminal_hole_labels(lines, pins)
+    _append_svg_layout_terminal_hole_labels(lines, circuit, pins)
+    if detail == "assembly":
+        _append_svg_layout_component_body_labels(lines, overlays)
     for label in labels:
         lines.append(dsl._svg_stripboard_overlay_label(label))
     lines.append("</svg>")
@@ -2884,12 +3016,22 @@ def _append_svg_layout_jumpers(lines, jumpers):
             f'stroke-width="{LAYOUT_JUMPER_STROKE_WIDTH:.3f}" '
             f'stroke-linecap="round"/>'
         )
+        for row, col in (jumper.start, jumper.end):
+            x, y = dsl._stripboard_hole_position((row, col))
+            lines.append(
+                f'  <circle class="layout-jumper-endpoint" '
+                f'data-net="{dsl._svg_attr(jumper.net_name)}" '
+                f'data-row="{row}" data-col="{col}" '
+                f'cx="{x:.3f}" cy="{y:.3f}" '
+                f'r="{LAYOUT_JUMPER_ENDPOINT_RADIUS:.3f}" '
+                f'fill="{LAYOUT_JUMPER_ENDPOINT_FILL}" '
+                f'stroke="{LAYOUT_JUMPER_STROKE}" '
+                f'stroke-width="{LAYOUT_JUMPER_STROKE_WIDTH:.3f}"/>'
+            )
 
 
-def _append_svg_layout_components(lines, layout, circuit, pins, detail):
-    for overlay in _layout_component_overlays(layout, circuit, pins):
-        if detail == "assembly":
-            _append_svg_layout_component_body(lines, overlay)
+def _append_svg_layout_component_segments(lines, overlays):
+    for overlay in overlays:
         for start, end in overlay["segments"]:
             lines.append(
                 f'  <line class="layout-component" '
@@ -2902,10 +3044,14 @@ def _append_svg_layout_components(lines, layout, circuit, pins, detail):
             )
 
 
+def _append_svg_layout_component_bodies(lines, overlays):
+    for overlay in overlays:
+        _append_svg_layout_component_body(lines, overlay)
+
+
 def _append_svg_layout_component_body(lines, overlay):
     x, y = overlay["body_center"]
-    radius = 0.300 if overlay["kind"] in {"bjt_npn", "pmos"} else 0.165
-    font_size = 0.210 if overlay["kind"] in {"bjt_npn", "pmos"} else 0.165
+    radius = _layout_component_body_radius(overlay)
     lines.append(
         f'  <circle class="layout-component-body" '
         f'data-element="{dsl._svg_attr(overlay["refdes"])}" '
@@ -2913,6 +3059,16 @@ def _append_svg_layout_component_body(lines, overlay):
         f'cx="{x:.3f}" cy="{y:.3f}" r="{radius:.3f}" '
         f'fill="{LAYOUT_COMPONENT_BODY_FILL}"/>'
     )
+
+
+def _append_svg_layout_component_body_labels(lines, overlays):
+    for overlay in overlays:
+        _append_svg_layout_component_body_label(lines, overlay)
+
+
+def _append_svg_layout_component_body_label(lines, overlay):
+    x, y = overlay["body_center"]
+    font_size = _layout_component_body_font_size(overlay)
     lines.append(
         f'  <text class="layout-component-body-label" '
         f'data-element="{dsl._svg_attr(overlay["refdes"])}" '
@@ -2951,8 +3107,13 @@ def _append_svg_layout_pins(lines, pins):
         )
 
 
-def _append_svg_layout_terminal_hole_labels(lines, pins):
+def _append_svg_layout_terminal_hole_labels(lines, circuit, pins):
+    components_by_refdes = {
+        component.refdes: component for component in circuit.components
+    }
     for pin in pins:
+        if not _pin_terminal_label_visible(pin, components_by_refdes):
+            continue
         x, y = dsl._stripboard_hole_position(pin.hole)
         lines.append(
             f'  <text class="layout-terminal-hole-label" '
@@ -2999,34 +3160,40 @@ def _render_stripboard_layout_png(layout, circuit, path, scale, detail):
         dsl._draw_stripboard_cut_png(draw, cut, label_margin, scale)
 
     jumper_width = max(1, int(round(LAYOUT_JUMPER_STROKE_WIDTH * scale)))
+    jumper_endpoint_width = max(1, int(round(LAYOUT_JUMPER_STROKE_WIDTH * scale)))
     for jumper in layout.jumpers:
+        start = dsl._offset_point(
+            dsl._stripboard_hole_position(jumper.start),
+            label_margin,
+            0,
+        )
+        end = dsl._offset_point(
+            dsl._stripboard_hole_position(jumper.end),
+            label_margin,
+            0,
+        )
         draw.line(
-            [
-                dsl._px_point(
-                    dsl._offset_point(
-                        dsl._stripboard_hole_position(jumper.start),
-                        label_margin,
-                        0,
-                    ),
-                    scale,
-                ),
-                dsl._px_point(
-                    dsl._offset_point(
-                        dsl._stripboard_hole_position(jumper.end),
-                        label_margin,
-                        0,
-                    ),
-                    scale,
-                ),
-            ],
+            [dsl._px_point(start, scale), dsl._px_point(end, scale)],
             fill=LAYOUT_JUMPER_STROKE,
             width=jumper_width,
         )
+        for center in (start, end):
+            draw.ellipse(
+                dsl._px_rect(
+                    center[0] - LAYOUT_JUMPER_ENDPOINT_RADIUS,
+                    center[1] - LAYOUT_JUMPER_ENDPOINT_RADIUS,
+                    LAYOUT_JUMPER_ENDPOINT_RADIUS * 2,
+                    LAYOUT_JUMPER_ENDPOINT_RADIUS * 2,
+                    scale,
+                ),
+                fill=LAYOUT_JUMPER_ENDPOINT_FILL,
+                outline=LAYOUT_JUMPER_STROKE,
+                width=jumper_endpoint_width,
+            )
 
     element_width = dsl._px_overlay_stroke(scale)
-    for overlay in _layout_component_overlays(layout, circuit, pins):
-        if detail == "assembly":
-            _draw_layout_component_body_png(image, draw, overlay, label_margin, scale)
+    overlays = _layout_component_overlays(layout, circuit, pins)
+    for overlay in overlays:
         for start, end in overlay["segments"]:
             draw.line(
                 [
@@ -3036,6 +3203,9 @@ def _render_stripboard_layout_png(layout, circuit, path, scale, detail):
                 fill=dsl.STRIPBOARD_OVERLAY_ELEMENT_STROKE,
                 width=element_width,
             )
+    if detail == "assembly":
+        for overlay in overlays:
+            _draw_layout_component_body_png(draw, overlay, label_margin, scale)
 
     if detail == "annotated":
         for blocker in layout.blockers:
@@ -3056,6 +3226,9 @@ def _render_stripboard_layout_png(layout, circuit, path, scale, detail):
                 fill=dsl.STRIPBOARD_OVERLAY_ELEMENT_STROKE,
             )
 
+    components_by_refdes = {
+        component.refdes: component for component in circuit.components
+    }
     for pin in pins:
         dsl._draw_px_circle(
             draw,
@@ -3068,7 +3241,17 @@ def _render_stripboard_layout_png(layout, circuit, path, scale, detail):
             scale,
             fill=dsl.STRIPBOARD_OVERLAY_TERMINAL_FILL,
         )
-        _draw_layout_terminal_hole_label_png(image, pin, label_margin, scale)
+        if _pin_terminal_label_visible(pin, components_by_refdes):
+            _draw_layout_terminal_hole_label_png(image, pin, label_margin, scale)
+
+    if detail == "assembly":
+        for overlay in overlays:
+            _draw_layout_component_body_label_png(
+                image,
+                overlay,
+                label_margin,
+                scale,
+            )
 
     for label in labels:
         dsl._draw_stripboard_overlay_label_png(image, label, label_margin, scale)
@@ -3076,22 +3259,24 @@ def _render_stripboard_layout_png(layout, circuit, path, scale, detail):
     image.save(path)
 
 
-def _draw_layout_component_body_png(image, draw, overlay, label_margin, scale):
+def _draw_layout_component_body_png(draw, overlay, label_margin, scale):
     center = dsl._offset_point(overlay["body_center"], label_margin, 0)
-    radius = 0.300 if overlay["kind"] in {"bjt_npn", "pmos"} else 0.165
-    font_size = 0.210 if overlay["kind"] in {"bjt_npn", "pmos"} else 0.165
     dsl._draw_px_circle(
         draw,
         center,
-        radius,
+        _layout_component_body_radius(overlay),
         scale,
         fill=LAYOUT_COMPONENT_BODY_FILL,
     )
+
+
+def _draw_layout_component_body_label_png(image, overlay, label_margin, scale):
+    center = dsl._offset_point(overlay["body_center"], label_margin, 0)
     dsl._draw_png_text_rotated(
         image,
         (center[0], center[1] + 0.005),
         overlay["refdes"],
-        font=dsl._overlay_png_font(scale, font_size),
+        font=dsl._overlay_png_font(scale, _layout_component_body_font_size(overlay)),
         scale=scale,
         fill=LAYOUT_COMPONENT_BODY_LABEL_FILL,
         angle=0,
@@ -3237,6 +3422,19 @@ def _component_body_center(terminal_holes, component_kind):
     if len(rows) == 1:
         return center[0], center[1] - 0.38
     return center[0] + 0.28, center[1] - 0.28
+
+
+def _layout_component_body_radius(overlay):
+    return 0.300 if overlay["kind"] in {"bjt_npn", "pmos"} else 0.165
+
+
+def _layout_component_body_font_size(overlay):
+    return 0.210 if overlay["kind"] in {"bjt_npn", "pmos"} else 0.165
+
+
+def _pin_terminal_label_visible(pin, components_by_refdes):
+    component = components_by_refdes.get(pin.refdes)
+    return component is not None and component.kind in DIRECTIONAL_TERMINAL_LABEL_KINDS
 
 
 def _component_label(component):

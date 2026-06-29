@@ -69,7 +69,6 @@ def test_create_manual_stripboard_layout_enumerates_physical_pins():
             "R2": ((2, 0), 0),
         },
         cuts=((0, 4), (2, 4)),
-        jumpers=(Jumper(start=(0, 3), end=(2, 0), net_name="midpoint"),),
     )
     pins = placed_component_pins(layout, circuit)
 
@@ -133,8 +132,8 @@ def test_render_stripboard_layout_writes_svg_and_png(tmp_path):
             "R1": ((0, 0), 0),
             "R2": ((2, 0), 0),
         },
-        cuts=((0, 4),),
-        jumpers=(((0, 3), (2, 0), "midpoint"),),
+        cuts=((0, 1),),
+        jumpers=(((0, 4), (2, 4), "midpoint"),),
     )
     svg_path = tmp_path / "manual_layout.svg"
     png_path = tmp_path / "manual_layout.png"
@@ -147,19 +146,21 @@ def test_render_stripboard_layout_writes_svg_and_png(tmp_path):
     assert 'class="layout-pin"' in svg
     assert 'class="layout-jumper"' in svg
     assert 'class="layout-blocker"' not in svg
-    assert svg.count('class="layout-terminal-hole-label"') == len(
-        placed_component_pins(layout, circuit)
-    )
+    assert svg.count('class="layout-terminal-hole-label"') == 0
     assert 'class="layout-pin-label"' not in svg
     assert 'data-element="R1"' in svg
     assert 'data-terminal="start"' in svg
+    assert 'class="layout-jumper-endpoint"' in svg
+    assert svg.index('class="layout-component"') < svg.index(
+        'class="layout-component-body-label"'
+    )
     assert png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
     annotated_path = tmp_path / "manual_layout_annotated.svg"
     render_stripboard_layout(layout, circuit, file=annotated_path, detail="annotated")
     annotated_svg = annotated_path.read_text(encoding="utf-8")
     assert 'class="layout-blocker"' in annotated_svg
-    assert 'class="layout-terminal-hole-label"' in annotated_svg
+    assert 'class="layout-terminal-hole-label"' not in annotated_svg
 
 
 def test_extract_physical_netlist_and_verification_pass_for_connected_layout():
@@ -171,7 +172,7 @@ def test_extract_physical_netlist_and_verification_pass_for_connected_layout():
             "R1": ((0, 0), 90),
             "R2": ((4, 2), 90),
         },
-        jumpers=(((3, 0), (4, 2), "midpoint"),),
+        jumpers=(((3, 1), (4, 1), "midpoint"),),
     )
 
     physical_netlist = extract_physical_netlist(layout, circuit)
@@ -197,7 +198,7 @@ def test_extract_physical_netlist_respects_strip_cuts():
             "R2": ((4, 2), 90),
         },
         cuts=((0, 1),),
-        jumpers=(((0, 3), (4, 2), "midpoint"),),
+        jumpers=(((0, 4), (4, 1), "midpoint"),),
     )
 
     report = verify_stripboard_layout(layout, circuit)
@@ -254,7 +255,7 @@ def test_plan_stripboard_routes_high_side_switch_with_jumpers_and_cuts():
 
     layout, report = plan_stripboard(
         circuit,
-        board=create_stripboard(8, 20),
+        board=create_stripboard(16, 20),
     )
 
     assert layout is not None
@@ -263,11 +264,36 @@ def test_plan_stripboard_routes_high_side_switch_with_jumpers_and_cuts():
     assert len(layout.jumpers) < sum(
         len(component.terminals) for component in circuit.components
     )
+    _assert_jumper_endpoints_are_dedicated(layout, circuit)
     assert {
         pin.net_name
         for conductor in report.physical_netlist.conductors
         for pin in conductor.pins
     } == {net.name for net in circuit.nets}
+
+
+def test_render_stripboard_layout_labels_only_directional_terminals(tmp_path):
+    circuit = circuit_from_schema(create_high_side_switch(), name="high_side_switch")
+    layout, report = plan_stripboard(
+        circuit,
+        board=create_stripboard(16, 20),
+    )
+    assert report.ok, report.summary()
+
+    svg_path = tmp_path / "high_side.svg"
+    render_stripboard_layout(layout, circuit, file=svg_path)
+    svg = svg_path.read_text(encoding="utf-8")
+    directional_pins = _directional_pins(layout, circuit)
+
+    assert svg.count('class="layout-terminal-hole-label"') == len(directional_pins)
+    assert 'data-element="Q1"' in svg
+    assert 'data-terminal="gate"' in svg
+    assert 'data-element="D1"' in svg
+    assert 'data-element="R1"' in svg
+    assert (
+        'class="layout-terminal-hole-label" data-net="gate" data-element="R1"'
+        not in svg
+    )
 
 
 def test_plan_stripboard_reports_failure_for_too_small_board():
@@ -294,7 +320,7 @@ def test_write_stripboard_build_outputs_writes_build_artifacts(tmp_path):
             "R2": ((4, 2), 90),
         },
         cuts=((0, 1),),
-        jumpers=(((0, 3), (4, 2), "midpoint"),),
+        jumpers=(((0, 4), (4, 1), "midpoint"),),
     )
     report = verify_stripboard_layout(layout, circuit)
     assert report.ok, report.summary()
@@ -333,17 +359,26 @@ def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(tmp_path):
     assert layout.board.height_pitches <= 12
     assert len(layout.cuts) <= 8
     assert len(layout.jumpers) <= 18
+    _assert_jumper_endpoints_are_dedicated(layout, circuit)
 
     svg_path = tmp_path / "tb6600.svg"
     render_stripboard_layout(layout, circuit, file=svg_path)
     svg = svg_path.read_text(encoding="utf-8")
-    pins = placed_component_pins(layout, circuit)
+    directional_pins = _directional_pins(layout, circuit)
 
-    assert svg.count('class="layout-terminal-hole-label"') == len(pins)
+    assert svg.count('class="layout-terminal-hole-label"') == len(directional_pins)
     assert 'class="layout-pin-label"' not in svg
+    assert 'class="layout-jumper-endpoint"' in svg
     assert 'class="layout-component-body"' in svg
+    assert svg.index('class="layout-component"') < svg.index(
+        'class="layout-component-body-label"'
+    )
     assert 'data-element="Q1"' in svg
     assert 'data-terminal="emitter"' in svg
+    assert (
+        'class="layout-terminal-hole-label" data-net="step_base" data-element="R1"'
+        not in svg
+    )
 
 
 def test_tb6600_build_outputs_include_only_verified_artifacts(tmp_path):
@@ -354,7 +389,10 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(tmp_path):
         outputs.top_svg.read_text(encoding="utf-8").count(
             'class="layout-terminal-hole-label"'
         )
-        == 27
+        == 9
+    )
+    assert 'class="layout-jumper-endpoint"' in outputs.top_svg.read_text(
+        encoding="utf-8"
     )
     assert not tuple(tmp_path.glob("*projection*"))
 
@@ -407,7 +445,7 @@ def test_verify_stripboard_layout_reports_drc_without_raising():
             PlacedComponent("R2", "axial_2pin_span3", (2, 0), 0),
         ),
         cuts=(StripboardCut(row=2, col=0),),
-        jumpers=(Jumper(start=(0, 0), end=(9, 9), net_name="ghost"),),
+        jumpers=(Jumper(start=(2, 0), end=(9, 9), net_name="ghost"),),
         blockers=(),
         footprints=default_footprints(),
     )
@@ -420,6 +458,7 @@ def test_verify_stripboard_layout_reports_drc_without_raising():
         "component_outside_board",
         "pin_on_cut",
         "jumper_outside_board",
+        "jumper_on_component_pin",
         "unknown_jumper_net",
     }.issubset({issue.code for issue in report.errors})
     with pytest.raises(ValueError, match="component_outside_board"):
@@ -496,6 +535,33 @@ def _conductors_by_net(physical_netlist):
     return conductors_by_net
 
 
+def _directional_pins(layout, circuit):
+    directional_refdeses = {
+        component.refdes
+        for component in circuit.components
+        if component.kind in {"bjt_npn", "pmos", "zener"}
+    }
+    return tuple(
+        pin
+        for pin in placed_component_pins(layout, circuit)
+        if pin.refdes in directional_refdeses
+    )
+
+
+def _assert_jumper_endpoints_are_dedicated(layout, circuit):
+    pin_holes = {pin.hole for pin in placed_component_pins(layout, circuit)}
+    cut_holes = {(cut.row, cut.col) for cut in layout.cuts}
+    blocker_holes = {(blocker.row, blocker.col) for blocker in layout.blockers}
+    used_jumper_holes = set()
+    for jumper in layout.jumpers:
+        for hole in (jumper.start, jumper.end):
+            assert hole not in pin_holes
+            assert hole not in cut_holes
+            assert hole not in blocker_holes
+            assert hole not in used_jumper_holes
+            used_jumper_holes.add(hole)
+
+
 def test_manual_layout_rejects_cut_on_component_pin():
     circuit = circuit_from_schema(create_voltage_divider())
 
@@ -508,6 +574,21 @@ def test_manual_layout_rejects_cut_on_component_pin():
                 "R2": ((2, 0), 0),
             },
             cuts=((0, 0),),
+        )
+
+
+def test_manual_layout_rejects_jumper_endpoint_on_component_pin():
+    circuit = circuit_from_schema(create_voltage_divider())
+
+    with pytest.raises(ValueError, match="shares component pin"):
+        create_manual_stripboard_layout(
+            circuit,
+            board=create_stripboard(8, 4),
+            placements={
+                "R1": ((0, 0), 0),
+                "R2": ((2, 0), 0),
+            },
+            jumpers=(((0, 3), (2, 4), "midpoint"),),
         )
 
 
