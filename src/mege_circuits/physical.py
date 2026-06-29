@@ -18,6 +18,9 @@ LAYOUT_JUMPER_STROKE = "#dc2626"
 LAYOUT_JUMPER_STROKE_WIDTH = 0.055
 LAYOUT_JUMPER_ENDPOINT_RADIUS = 0.115
 LAYOUT_JUMPER_ENDPOINT_FILL = "#ffffff"
+LAYOUT_CONNECTOR_FILL = "#2563eb"
+LAYOUT_CONNECTOR_STROKE = "#ffffff"
+LAYOUT_CONNECTOR_RADIUS = 0.135
 LAYOUT_COMPONENT_BODY_FILL = "#111827"
 LAYOUT_COMPONENT_BODY_LABEL_FILL = "#ffffff"
 DIRECTIONAL_TERMINAL_LABEL_KINDS = frozenset(("bjt_npn", "pmos", "zener"))
@@ -96,6 +99,31 @@ class Jumper:
 
 
 @dataclass(frozen=True)
+class PlacedConnector:
+    name: str
+    net_name: str
+    hole: tuple[int, int]
+    label: str | None = None
+    kind: str = "nail"
+
+    def __post_init__(self):
+        object.__setattr__(self, "name", str(self.name))
+        object.__setattr__(self, "net_name", str(self.net_name))
+        object.__setattr__(self, "hole", _coerce_grid_point(self.hole, "connector"))
+        if self.label is not None:
+            object.__setattr__(self, "label", str(self.label))
+        object.__setattr__(self, "kind", str(self.kind))
+
+    @property
+    def row(self):
+        return self.hole[0]
+
+    @property
+    def col(self):
+        return self.hole[1]
+
+
+@dataclass(frozen=True)
 class PlacedPin:
     refdes: str
     terminal_name: str
@@ -117,6 +145,7 @@ class PhysicalLayout:
     placed_components: tuple[PlacedComponent, ...]
     cuts: tuple[StripboardCut, ...]
     jumpers: tuple[Jumper, ...]
+    connectors: tuple[PlacedConnector, ...] = ()
     blockers: tuple[StripboardBlocker, ...] = ()
     annotations: tuple[str, ...] = ()
     footprints: tuple[Footprint, ...] = field(default_factory=tuple)
@@ -180,6 +209,9 @@ class StripboardRoutingHints:
     component_terminal_holes: Mapping[tuple[str, str], tuple[int, int]] = field(
         default_factory=dict
     )
+    connector_holes: Mapping[str, tuple[int, int]] = field(default_factory=dict)
+    connector_net_names: Mapping[str, str] = field(default_factory=dict)
+    connector_labels: Mapping[str, str] = field(default_factory=dict)
     component_order: tuple[str, ...] = ()
     board_width_pitches: int | None = None
     board_height_pitches: int | None = None
@@ -218,6 +250,33 @@ class StripboardRoutingHints:
                         self.component_terminal_holes or {}
                     ).items()
                 }
+            ),
+        )
+        object.__setattr__(
+            self,
+            "connector_holes",
+            MappingProxyType(
+                {
+                    str(name): _coerce_grid_point(hole, "connector hole")
+                    for name, hole in self.connector_holes.items()
+                }
+            ),
+        )
+        object.__setattr__(
+            self,
+            "connector_net_names",
+            MappingProxyType(
+                {
+                    str(name): str(net_name)
+                    for name, net_name in self.connector_net_names.items()
+                }
+            ),
+        )
+        object.__setattr__(
+            self,
+            "connector_labels",
+            MappingProxyType(
+                {str(name): str(label) for name, label in self.connector_labels.items()}
             ),
         )
         object.__setattr__(
@@ -356,6 +415,7 @@ def create_manual_stripboard_layout(
     placements=None,
     cuts=(),
     jumpers=(),
+    connectors=(),
     blockers=(),
     annotations=(),
 ):
@@ -379,6 +439,7 @@ def create_manual_stripboard_layout(
     )
     layout_cuts = _normalize_cuts(cuts)
     layout_jumpers = _normalize_jumpers(jumpers)
+    layout_connectors = _normalize_connectors(connectors)
     explicit_blockers = _normalize_blockers(blockers)
     generated_blockers = _generated_component_blockers(
         placed_components,
@@ -389,6 +450,7 @@ def create_manual_stripboard_layout(
         placed_components=placed_components,
         cuts=layout_cuts,
         jumpers=layout_jumpers,
+        connectors=layout_connectors,
         blockers=_dedupe_blockers((*explicit_blockers, *generated_blockers)),
         annotations=tuple(str(annotation) for annotation in annotations),
         footprints=tuple(footprint_map[name] for name in sorted(footprint_map)),
@@ -494,7 +556,27 @@ def stripboard_hints_from_schema(
     }
     component_terminal_holes = {}
     terminal_columns_by_component = {}
+    node_views_by_name = {node_view.name: node_view for node_view in schema.node_views}
+    connector_holes = {}
+    connector_net_names = {}
+    connector_labels = {}
     for marker_key, column in assignment.marker_column_maps.items():
+        if len(marker_key) == 2 and marker_key[0] == "node":
+            _kind, node_name = marker_key
+            node_view = node_views_by_name.get(node_name)
+            if (
+                node_view is None
+                or not _is_stripboard_physical_node_view(node_view)
+                or node_view.net.name not in assignment.net_rows
+            ):
+                continue
+            connector_holes[node_name] = (
+                assignment.net_rows[node_view.net.name],
+                column,
+            )
+            connector_net_names[node_name] = node_view.net.name
+            connector_labels[node_name] = node_view.label or node_name
+            continue
         if len(marker_key) != 3 or marker_key[0] != "terminal":
             continue
         _kind, refdes, terminal_name = marker_key
@@ -525,6 +607,9 @@ def stripboard_hints_from_schema(
         net_rows=assignment.net_rows,
         component_columns=component_columns,
         component_terminal_holes=component_terminal_holes,
+        connector_holes=connector_holes,
+        connector_net_names=connector_net_names,
+        connector_labels=connector_labels,
         component_order=component_order,
         board_width_pitches=assignment.stripboard.width_pitches,
         board_height_pitches=assignment.stripboard.height_pitches,
@@ -565,6 +650,11 @@ def plan_stripboard(
         )
         normalized_fixed_cuts = _normalize_cuts(fixed_cuts)
         normalized_fixed_jumpers = _normalize_jumpers(fixed_jumpers)
+        routing_connectors = _routing_connectors_from_hints(
+            routing_hints,
+            circuit,
+            board,
+        )
     except (TypeError, ValueError) as error:
         return None, _routing_failure_report(str(error))
 
@@ -576,6 +666,7 @@ def plan_stripboard(
         routing_hints,
         fixed_placement_map,
         net_rows,
+        reserved_holes={connector.hole for connector in routing_connectors},
     )
     if placement_error is not None:
         return None, _routing_failure_report(placement_error)
@@ -590,6 +681,7 @@ def plan_stripboard(
             planned,
             footprint_map,
             normalized_fixed_cuts,
+            routing_connectors,
         )
         if cut_error is not None:
             continue
@@ -602,6 +694,7 @@ def plan_stripboard(
                 placements=planned,
                 cuts=_dedupe_cuts((*normalized_fixed_cuts, *generated_cuts)),
                 jumpers=_dedupe_jumpers(normalized_fixed_jumpers),
+                connectors=routing_connectors,
             )
         except (TypeError, ValueError):
             continue
@@ -632,6 +725,7 @@ def plan_stripboard(
                     jumpers=_dedupe_jumpers(
                         (*normalized_fixed_jumpers, *generated_jumpers)
                     ),
+                    connectors=routing_connectors,
                 )
             except (TypeError, ValueError):
                 continue
@@ -849,6 +943,7 @@ def _render_stripboard_bottom_svg(layout, circuit, path, scale):
     _append_svg_bottom_board(lines, layout.board)
     _append_svg_bottom_cuts(lines, layout)
     _append_svg_bottom_pins(lines, layout, pins)
+    _append_svg_bottom_connectors(lines, layout)
     lines.append("</svg>")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -908,6 +1003,22 @@ def _append_svg_bottom_pins(lines, layout, pins):
         )
 
 
+def _append_svg_bottom_connectors(lines, layout):
+    for connector in layout.connectors:
+        x, y = _bottom_hole_position(layout.board, connector.hole)
+        lines.append(
+            f'  <circle class="bottom-connector" '
+            f'data-net="{dsl._svg_attr(connector.net_name)}" '
+            f'data-connector="{dsl._svg_attr(connector.name)}" '
+            f'data-row="{connector.row}" data-col="{connector.col}" '
+            f'cx="{x:.3f}" cy="{y:.3f}" '
+            f'r="{LAYOUT_CONNECTOR_RADIUS:.3f}" '
+            f'fill="{LAYOUT_CONNECTOR_FILL}" '
+            f'stroke="{LAYOUT_CONNECTOR_STROKE}" '
+            f'stroke-width="{LAYOUT_JUMPER_STROKE_WIDTH:.3f}"/>'
+        )
+
+
 def _render_stripboard_bottom_png(layout, circuit, path, scale):
     scale = dsl._validate_render_scale(scale)
     try:
@@ -935,6 +1046,12 @@ def _render_stripboard_bottom_png(layout, circuit, path, scale):
             dsl.STRIPBOARD_OVERLAY_TERMINAL_RADIUS,
             scale,
             fill=dsl.STRIPBOARD_OVERLAY_TERMINAL_FILL,
+        )
+    for connector in layout.connectors:
+        _draw_layout_connector_png_at(
+            draw,
+            _bottom_hole_position(layout.board, connector.hole),
+            scale,
         )
 
     image.save(path)
@@ -982,6 +1099,7 @@ def _render_stripboard_debug_svg(layout, circuit, report, path, scale):
     _append_svg_debug_conductors(lines, report.physical_netlist)
     _append_svg_debug_jumpers(lines, layout)
     _append_svg_layout_pins(lines, placed_component_pins(layout, circuit))
+    _append_svg_layout_connectors(lines, layout.connectors)
     lines.append("</svg>")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1114,6 +1232,8 @@ def _render_stripboard_debug_png(layout, circuit, report, path, scale):
             scale,
             fill=dsl.STRIPBOARD_OVERLAY_TERMINAL_FILL,
         )
+    for connector in layout.connectors:
+        _draw_layout_connector_png(draw, connector, 0, scale)
 
     image.save(path)
 
@@ -1205,6 +1325,15 @@ def _stripboard_build_checklist_lines(layout, circuit, report):
                 f"row {pin.row}, col {pin.col}"
             )
 
+    lines.extend(["", "## External Connectors"])
+    for connector in layout.connectors:
+        label = "" if connector.label is None else f" `{connector.label}`"
+        lines.append(
+            "- [ ] "
+            f"{connector.name}{label}: net `{connector.net_name}`, "
+            f"row {connector.row}, col {connector.col}"
+        )
+
     lines.extend(["", "## Strip Cuts"])
     for cut in layout.cuts:
         lines.append(
@@ -1251,6 +1380,17 @@ def _stripboard_build_json_data(layout, circuit, report):
                 for component in layout.placed_components
             ],
             "cuts": [{"row": cut.row, "col": cut.col} for cut in layout.cuts],
+            "connectors": [
+                {
+                    "name": connector.name,
+                    "label": connector.label,
+                    "kind": connector.kind,
+                    "net_name": connector.net_name,
+                    "row": connector.row,
+                    "col": connector.col,
+                }
+                for connector in layout.connectors
+            ],
             "jumpers": [
                 {
                     "net_name": jumper.net_name,
@@ -1388,6 +1528,32 @@ def _routing_net_rows(circuit, hints):
     return net_rows
 
 
+def _routing_connectors_from_hints(hints, circuit, board):
+    net_names = {net.name for net in circuit.nets}
+    connectors = []
+    seen_holes = set()
+    for name, hole in hints.connector_holes.items():
+        net_name = hints.connector_net_names.get(name)
+        if net_name is None:
+            raise ValueError(f"Connector hint {name!r} has no net name.")
+        if net_name not in net_names:
+            raise ValueError(f"Connector hint {name!r} uses unknown net {net_name!r}.")
+        if not _hole_on_board(board, hole[0], hole[1]):
+            raise ValueError(f"Connector hint {name!r} is outside the board: {hole}.")
+        if hole in seen_holes:
+            raise ValueError(f"Multiple connector hints share hole {hole}.")
+        seen_holes.add(hole)
+        connectors.append(
+            PlacedConnector(
+                name=name,
+                net_name=net_name,
+                hole=hole,
+                label=hints.connector_labels.get(name, name),
+            )
+        )
+    return tuple(sorted(connectors, key=lambda connector: connector.name))
+
+
 def _route_component_placements(
     circuit,
     board,
@@ -1395,6 +1561,7 @@ def _route_component_placements(
     hints,
     fixed_placements,
     net_rows,
+    reserved_holes=frozenset(),
 ):
     components_by_refdes = {
         component.refdes: component for component in circuit.components
@@ -1418,6 +1585,7 @@ def _route_component_placements(
         components_by_refdes,
         footprint_map,
         board,
+        reserved_holes,
     )
     if initial_error is not None:
         return None, initial_error
@@ -1549,9 +1717,10 @@ def _routing_initial_placement_state(
     components_by_refdes,
     footprint_map,
     board,
+    reserved_holes=frozenset(),
 ):
     planned = {}
-    pin_holes = frozenset()
+    pin_holes = frozenset(reserved_holes)
     blocker_holes = frozenset()
     for refdes, placed_component in fixed_placements.items():
         component = components_by_refdes[refdes]
@@ -1858,9 +2027,12 @@ def _component_route_pins(component, placed_component, footprint):
         )
 
 
-def _routing_conflict_cuts(circuit, planned, footprint_map, fixed_cuts):
+def _routing_conflict_cuts(circuit, planned, footprint_map, fixed_cuts, connectors=()):
     cuts_by_hole = {(cut.row, cut.col): cut for cut in fixed_cuts}
     pins_by_row = {}
+    for connector in connectors:
+        pin = _connector_pin(connector)
+        pins_by_row.setdefault(pin.row, []).append((pin, pin.col))
     for component in circuit.components:
         placed_component = planned[component.refdes]
         footprint = footprint_map[placed_component.footprint_name]
@@ -1948,6 +2120,7 @@ def _routing_connectivity_jumpers(layout, circuit, physical_netlist):
 def _reserved_jumper_endpoint_holes(layout, circuit):
     return (
         {pin.hole for pin in placed_component_pins(layout, circuit)}
+        | {connector.hole for connector in layout.connectors}
         | {(cut.row, cut.col) for cut in layout.cuts}
         | {(blocker.row, blocker.col) for blocker in layout.blockers}
         | {hole for jumper in layout.jumpers for hole in (jumper.start, jumper.end)}
@@ -2108,6 +2281,7 @@ def _routing_failure_report(message, code="routing_failed"):
 def _layout_used_height(layout):
     rows = [
         *[pin.row for pin in _layout_score_pins(layout)],
+        *[connector.row for connector in layout.connectors],
         *[cut.row for cut in layout.cuts],
         *[hole[0] for jumper in layout.jumpers for hole in (jumper.start, jumper.end)],
         *[blocker.row for blocker in layout.blockers],
@@ -2118,6 +2292,7 @@ def _layout_used_height(layout):
 def _layout_used_width(layout):
     cols = [
         *[pin.col for pin in _layout_score_pins(layout)],
+        *[connector.col for connector in layout.connectors],
         *[cut.col for cut in layout.cuts],
         *[hole[1] for jumper in layout.jumpers for hole in (jumper.start, jumper.end)],
         *[blocker.col for blocker in layout.blockers],
@@ -2167,6 +2342,9 @@ def _physical_layout_drc_issues(layout, circuit):
         footprint_map,
     )
     issues.extend(pin_issues)
+    connector_pins, connector_issues = _layout_connectors_and_issues(layout, circuit)
+    issues.extend(connector_issues)
+    physical_pins = (*pins, *connector_pins)
 
     blockers = _valid_blockers(
         (*layout.blockers, *generated_blockers),
@@ -2174,10 +2352,10 @@ def _physical_layout_drc_issues(layout, circuit):
         issues,
     )
     cut_holes = _valid_cut_holes(layout, issues)
-    _check_jumpers(layout, circuit, cut_holes, pins, blockers, issues)
-    _check_pin_hole_collisions(pins, issues)
-    _check_pins_on_cuts(pins, cut_holes, issues)
-    _check_blocker_pin_collisions(blockers, pins, issues)
+    _check_jumpers(layout, circuit, cut_holes, physical_pins, blockers, issues)
+    _check_pin_hole_collisions(physical_pins, issues)
+    _check_pins_on_cuts(physical_pins, cut_holes, issues)
+    _check_blocker_pin_collisions(blockers, physical_pins, issues)
     return tuple(issues)
 
 
@@ -2351,6 +2529,76 @@ def _layout_pins_and_issues(layout, circuit, footprint_map):
         )
 
     return tuple(pins), tuple(issues), tuple(generated_blockers)
+
+
+def _layout_connectors_and_issues(layout, circuit):
+    issues = []
+    pins = []
+    net_names = {net.name for net in circuit.nets}
+    seen_names = set()
+    for connector in layout.connectors:
+        if not isinstance(connector, PlacedConnector):
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "invalid_connector",
+                    (
+                        "Layout connector is "
+                        f"{type(connector).__name__}, not PlacedConnector."
+                    ),
+                )
+            )
+            continue
+        if connector.name in seen_names:
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "duplicate_connector",
+                    f"Connector {connector.name!r} is placed more than once.",
+                    subject=connector.name,
+                    holes=(connector.hole,),
+                )
+            )
+        seen_names.add(connector.name)
+        if connector.net_name not in net_names:
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "unknown_connector_net",
+                    (
+                        f"Connector {connector.name!r} uses unknown net "
+                        f"{connector.net_name!r}."
+                    ),
+                    subject=connector.name,
+                    holes=(connector.hole,),
+                )
+            )
+        pins.append(_connector_pin(connector))
+        if not _hole_on_board(layout.board, connector.row, connector.col):
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "connector_outside_board",
+                    (
+                        f"Connector {connector.name!r} at {connector.hole} "
+                        "is outside the board."
+                    ),
+                    subject=connector.name,
+                    holes=(connector.hole,),
+                )
+            )
+    return tuple(pins), tuple(issues)
+
+
+def _connector_pin(connector):
+    return PlacedPin(
+        refdes=connector.name,
+        terminal_name="pin",
+        net_name=connector.net_name,
+        row=connector.row,
+        col=connector.col,
+        footprint_name=connector.kind,
+    )
 
 
 def _check_component_footprint_assignment(component, footprint, issues):
@@ -2609,7 +2857,7 @@ def _extract_physical_netlist_unchecked(layout, circuit):
         graph.union(jumper.start, jumper.end)
 
     pins_by_root = {}
-    for pin in placed_component_pins(layout, circuit):
+    for pin in _layout_physical_pins(layout, circuit):
         root = graph.find(pin.hole)
         pins_by_root.setdefault(root, []).append(pin)
 
@@ -2643,6 +2891,13 @@ def _extract_physical_netlist_unchecked(layout, circuit):
     return PhysicalNetlist(
         board=layout.board,
         conductors=tuple(conductors),
+    )
+
+
+def _layout_physical_pins(layout, circuit):
+    return (
+        *placed_component_pins(layout, circuit),
+        *(_connector_pin(c) for c in layout.connectors),
     )
 
 
@@ -2804,6 +3059,31 @@ def _normalize_jumpers(jumpers):
     )
 
 
+def _normalize_connectors(connectors):
+    normalized = []
+    for connector in connectors:
+        if isinstance(connector, PlacedConnector):
+            normalized.append(connector)
+            continue
+        if not isinstance(connector, tuple) or len(connector) not in (3, 4, 5):
+            raise TypeError(
+                "Connectors must be PlacedConnector objects or "
+                "(name, net_name, hole[, label[, kind]])."
+            )
+        label = connector[3] if len(connector) >= 4 else None
+        kind = connector[4] if len(connector) >= 5 else "nail"
+        normalized.append(
+            PlacedConnector(
+                name=connector[0],
+                net_name=connector[1],
+                hole=connector[2],
+                label=label,
+                kind=kind,
+            )
+        )
+    return tuple(sorted(normalized, key=lambda item: item.name))
+
+
 def _normalize_blockers(blockers):
     normalized = []
     for blocker in blockers:
@@ -2883,6 +3163,31 @@ def _validate_layout_geometry(layout, circuit, footprint_map):
             )
         pin_holes[pin.hole] = pin
 
+    connector_names = set()
+    for connector in layout.connectors:
+        if connector.name in connector_names:
+            raise ValueError(f"Connector {connector.name!r} is placed more than once.")
+        connector_names.add(connector.name)
+        if connector.net_name not in net_names:
+            raise ValueError(
+                f"Connector {connector.name!r} uses unknown net "
+                f"{connector.net_name!r}."
+            )
+        _require_hole_on_board(layout.board, *connector.hole, "connector")
+        connector_pin = _connector_pin(connector)
+        if connector.hole in cut_holes:
+            raise ValueError(
+                f"Connector {connector.name!r} is on cut hole {connector.hole}."
+            )
+        if connector.hole in pin_holes:
+            other = pin_holes[connector.hole]
+            raise ValueError(
+                f"Multiple physical terminals share hole {connector.hole}: "
+                f"{other.refdes}.{other.terminal_name} and connector "
+                f"{connector.name}."
+            )
+        pin_holes[connector.hole] = connector_pin
+
     for blocker in layout.blockers:
         _require_hole_on_board(layout.board, blocker.row, blocker.col, "blocker")
         pin = pin_holes.get((blocker.row, blocker.col))
@@ -2956,6 +3261,7 @@ def _render_stripboard_layout_svg(layout, circuit, path, scale, detail):
     if detail == "annotated":
         _append_svg_layout_blockers(lines, layout.blockers)
     _append_svg_layout_pins(lines, pins)
+    _append_svg_layout_connectors(lines, layout.connectors)
     _append_svg_layout_terminal_hole_labels(lines, circuit, pins)
     if detail == "assembly":
         _append_svg_layout_component_body_labels(lines, overlays)
@@ -3147,6 +3453,23 @@ def _append_svg_layout_pins(lines, pins):
         )
 
 
+def _append_svg_layout_connectors(lines, connectors):
+    for connector in connectors:
+        x, y = dsl._stripboard_hole_position(connector.hole)
+        lines.append(
+            f'  <circle class="layout-connector" '
+            f'data-net="{dsl._svg_attr(connector.net_name)}" '
+            f'data-connector="{dsl._svg_attr(connector.name)}" '
+            f'data-kind="{dsl._svg_attr(connector.kind)}" '
+            f'data-row="{connector.row}" data-col="{connector.col}" '
+            f'cx="{x:.3f}" cy="{y:.3f}" '
+            f'r="{LAYOUT_CONNECTOR_RADIUS:.3f}" '
+            f'fill="{LAYOUT_CONNECTOR_FILL}" '
+            f'stroke="{LAYOUT_CONNECTOR_STROKE}" '
+            f'stroke-width="{LAYOUT_JUMPER_STROKE_WIDTH:.3f}"/>'
+        )
+
+
 def _append_svg_layout_terminal_hole_labels(lines, circuit, pins):
     components_by_refdes = {
         component.refdes: component for component in circuit.components
@@ -3282,6 +3605,9 @@ def _render_stripboard_layout_png(layout, circuit, path, scale, detail):
         if _pin_terminal_label_visible(pin, components_by_refdes):
             _draw_layout_terminal_hole_label_png(image, pin, label_margin, scale)
 
+    for connector in layout.connectors:
+        _draw_layout_connector_png(draw, connector, label_margin, scale)
+
     if detail == "assembly":
         for overlay in overlays:
             _draw_layout_component_body_label_png(
@@ -3336,6 +3662,31 @@ def _draw_layout_terminal_hole_label_png(image, pin, label_margin, scale):
     )
 
 
+def _draw_layout_connector_png(draw, connector, label_margin, scale):
+    center = dsl._offset_point(
+        dsl._stripboard_hole_position(connector.hole),
+        label_margin,
+        0,
+    )
+    _draw_layout_connector_png_at(draw, center, scale)
+
+
+def _draw_layout_connector_png_at(draw, center, scale):
+    stroke_width = max(1, int(round(LAYOUT_JUMPER_STROKE_WIDTH * scale)))
+    draw.ellipse(
+        dsl._px_rect(
+            center[0] - LAYOUT_CONNECTOR_RADIUS,
+            center[1] - LAYOUT_CONNECTOR_RADIUS,
+            LAYOUT_CONNECTOR_RADIUS * 2,
+            LAYOUT_CONNECTOR_RADIUS * 2,
+            scale,
+        ),
+        fill=LAYOUT_CONNECTOR_FILL,
+        outline=LAYOUT_CONNECTOR_STROKE,
+        width=stroke_width,
+    )
+
+
 def _layout_label_margin(labels):
     longest_label = max((len(label.text) for label in labels), default=0)
     return max(
@@ -3345,9 +3696,36 @@ def _layout_label_margin(labels):
 
 
 def _placed_layout_labels(layout, circuit, pins, detail):
-    labels = list(_layout_row_labels(layout, pins))
+    labels = list(
+        _layout_row_labels(
+            layout, (*pins, *(_connector_pin(c) for c in layout.connectors))
+        )
+    )
+    for connector in layout.connectors:
+        label = connector.label or connector.name
+        if not label:
+            continue
+        x, y = dsl._stripboard_hole_position(connector.hole)
+        labels.append(
+            dsl._StripboardOverlayLabel(
+                class_name="layout-connector-label",
+                text=label,
+                x=x + 0.18,
+                y=y - 0.16,
+                font_size=dsl.STRIPBOARD_OVERLAY_NODE_LABEL_SIZE,
+                font_weight="800",
+                text_anchor="start",
+                rotation_degrees=dsl.STRIPBOARD_OVERLAY_LABEL_ANGLE,
+                data_attrs=(
+                    ("data-net", connector.net_name),
+                    ("data-connector", connector.name),
+                ),
+                collision_priority=2,
+                candidates=dsl._stripboard_node_label_candidates(x, y),
+            )
+        )
     if detail != "annotated":
-        return tuple(labels)
+        return dsl._resolve_stripboard_overlay_label_collisions(tuple(labels))
     for overlay in _layout_component_overlays(layout, circuit, pins):
         center = overlay["center"]
         labels.append(
@@ -3473,6 +3851,10 @@ def _layout_component_body_font_size(overlay):
 def _pin_terminal_label_visible(pin, components_by_refdes):
     component = components_by_refdes.get(pin.refdes)
     return component is not None and component.kind in DIRECTIONAL_TERMINAL_LABEL_KINDS
+
+
+def _is_stripboard_physical_node_view(node_view):
+    return node_view.kind not in dsl.STRIPBOARD_NON_PHYSICAL_NODE_KINDS
 
 
 def _component_label(component):

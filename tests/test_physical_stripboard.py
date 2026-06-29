@@ -18,6 +18,7 @@ from mege_circuits.simple import (
     PhysicalNetlist,
     PhysicalVerificationReport,
     PlacedComponent,
+    PlacedConnector,
     PlacedPin,
     StripboardBlocker,
     StripboardBuildOutputs,
@@ -248,6 +249,49 @@ def test_extract_physical_netlist_respects_strip_cuts():
     )
 
 
+def test_manual_layout_connectors_are_physical_pins_and_rendered(tmp_path):
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(5, 8),
+        placements={
+            "R1": ((0, 0), 90),
+            "R2": ((4, 2), 90),
+        },
+        jumpers=(((3, 1), (4, 1), "midpoint"),),
+        connectors=(PlacedConnector("J_mid", "midpoint", (3, 2), "MID"),),
+    )
+    report = verify_stripboard_layout(layout, circuit)
+    assert report.ok, report.summary()
+
+    svg_path = tmp_path / "connector_layout.svg"
+    data_path = tmp_path / "connector_layout.json"
+    render_stripboard_layout(layout, circuit, file=svg_path)
+    write_stripboard_build_json(layout, circuit, report, file=data_path)
+
+    svg = svg_path.read_text(encoding="utf-8")
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+    midpoint_conductor = _conductors_by_net(report.physical_netlist)["midpoint"][0]
+
+    assert any(
+        (pin.refdes, pin.terminal_name) == ("J_mid", "pin")
+        for pin in midpoint_conductor.pins
+    )
+    assert 'class="layout-connector"' in svg
+    assert 'data-connector="J_mid"' in svg
+    assert 'class="layout-connector-label"' in svg
+    assert data["layout"]["connectors"] == [
+        {
+            "col": 2,
+            "kind": "nail",
+            "label": "MID",
+            "name": "J_mid",
+            "net_name": "midpoint",
+            "row": 3,
+        }
+    ]
+
+
 def test_plan_stripboard_routes_voltage_divider_with_verified_layout():
     circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
 
@@ -398,6 +442,18 @@ def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(tmp_path):
     assert len(layout.cuts) <= 8
     assert len(layout.jumpers) <= 18
     _assert_jumper_endpoints_are_dedicated(layout, circuit)
+    assert any(
+        connector.name == "STEP_minus"
+        and connector.label == "PUL-"
+        and connector.net_name == "step_pul_minus"
+        for connector in layout.connectors
+    )
+    assert any(
+        {(pin.refdes, pin.terminal_name) for pin in conductor.pins}.issuperset(
+            {("Q1", "collector"), ("STEP_minus", "pin")}
+        )
+        for conductor in report.physical_netlist.conductors
+    )
 
     svg_path = tmp_path / "tb6600.svg"
     render_stripboard_layout(layout, circuit, file=svg_path)
@@ -414,6 +470,9 @@ def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(tmp_path):
     )
     assert 'data-element="Q1"' in svg
     assert 'data-terminal="emitter"' in svg
+    assert 'class="layout-connector"' in svg
+    assert 'data-connector="STEP_minus"' in svg
+    assert ">PUL-</text>" in svg
     assert (
         'class="layout-terminal-hole-label" data-net="step_base" data-element="R1"'
         not in svg
@@ -432,6 +491,16 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(tmp_path):
     )
     assert 'class="layout-jumper-endpoint"' in outputs.top_svg.read_text(
         encoding="utf-8"
+    )
+    assert 'data-connector="STEP_minus"' in outputs.top_svg.read_text(encoding="utf-8")
+    assert 'class="bottom-connector"' in outputs.bottom_svg.read_text(encoding="utf-8")
+    assert "## External Connectors" in outputs.checklist_md.read_text(encoding="utf-8")
+    data = json.loads(outputs.data_json.read_text(encoding="utf-8"))
+    assert any(
+        connector["name"] == "STEP_minus"
+        and connector["label"] == "PUL-"
+        and connector["net_name"] == "step_pul_minus"
+        for connector in data["layout"]["connectors"]
     )
     assert not tuple(tmp_path.glob("*projection*"))
 
@@ -589,12 +658,14 @@ def _directional_pins(layout, circuit):
 
 def _assert_jumper_endpoints_are_dedicated(layout, circuit):
     pin_holes = {pin.hole for pin in placed_component_pins(layout, circuit)}
+    connector_holes = {connector.hole for connector in layout.connectors}
     cut_holes = {(cut.row, cut.col) for cut in layout.cuts}
     blocker_holes = {(blocker.row, blocker.col) for blocker in layout.blockers}
     used_jumper_holes = set()
     for jumper in layout.jumpers:
         for hole in (jumper.start, jumper.end):
             assert hole not in pin_holes
+            assert hole not in connector_holes
             assert hole not in cut_holes
             assert hole not in blocker_holes
             assert hole not in used_jumper_holes
@@ -628,6 +699,21 @@ def test_manual_layout_rejects_jumper_endpoint_on_component_pin():
                 "R2": ((2, 0), 0),
             },
             jumpers=(((0, 3), (2, 4), "midpoint"),),
+        )
+
+
+def test_manual_layout_rejects_connector_on_component_pin():
+    circuit = circuit_from_schema(create_voltage_divider())
+
+    with pytest.raises(ValueError, match="Multiple physical terminals share hole"):
+        create_manual_stripboard_layout(
+            circuit,
+            board=create_stripboard(8, 4),
+            placements={
+                "R1": ((0, 0), 0),
+                "R2": ((2, 0), 0),
+            },
+            connectors=(("J1", "vcc", (0, 0), "VCC"),),
         )
 
 
