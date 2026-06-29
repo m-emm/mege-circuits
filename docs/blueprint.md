@@ -506,10 +506,11 @@ them.
 Implementation status: this phase now has a conservative first router through
 `plan_stripboard(...)`, `stripboard_hints_from_schema(...)`, and
 `score_stripboard_layout(...)` in `mege_circuits.physical`, exposed through
-`mege_circuits.simple`. The router creates one bus row per semantic net, places
-components on physical footprint rows, inserts isolation cuts between different
-net pins on the same strip, adds top-side jumpers from pins to their net bus
-rows, and accepts results only after `verify_stripboard_layout(...)` passes.
+`mege_circuits.simple`. The router now uses the compact legacy projection as
+placement hints, searches legal footprint placements near projected terminal
+holes, inserts only the cuts needed to isolate same-row conflicts, adds
+top-side jumpers for remaining open physical conductors, and accepts results
+only after `verify_stripboard_layout(...)` passes.
 
 ### Phase 5: Produce Build Outputs
 
@@ -532,7 +533,10 @@ Implementation status: this phase now has reusable build output helpers through
 `write_stripboard_build_json(...)` in `mege_circuits.physical`, exposed through
 `mege_circuits.simple`. The TB6600 integration script uses these helpers to
 generate a verified top assembly, bottom cut view, connectivity debug view,
-Markdown checklist, and machine-readable JSON.
+Markdown checklist, and machine-readable JSON. The default top assembly view is
+now readable-first: components and jumpers are distinct, row labels sit outside
+the board, and each terminal label appears once at its physical hole; denser
+diagnostic information remains available through annotated/debug outputs.
 
 ## Renderer Refactor Plan
 

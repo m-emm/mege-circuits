@@ -1,4 +1,4 @@
-"""Render the diagnostic stripboard projection of the TB6600 interface."""
+"""Render the verified TB6600 stripboard build artifacts."""
 
 from pathlib import Path
 
@@ -31,8 +31,10 @@ except ModuleNotFoundError:
 
 DEFAULT_OUTPUT_DIR = Path(__file__).with_name("diagrams")
 STRIPBOARD_ARTIFACT_STEM = "pico_tb6600_stripboard_interface_stripboard"
-TB6600_BUILD_BOARD_WIDTH = 8
-TB6600_BUILD_BOARD_EXTRA_ROWS = 2
+OBSOLETE_STRIPBOARD_ARTIFACT_STEMS = (
+    "pico_tb6600_stripboard_interface_stripboard_projection",
+)
+TB6600_PRIORITY_ELEMENTS = ("Q1", "Q2", "Q3")
 
 
 def create_stripboard_projection():
@@ -48,11 +50,16 @@ def create_stripboard_projection():
     return schema, assignment
 
 
-def render_tb6600_stripboard_projection(output_dir=None):
-    output_dir = Path(output_dir) if output_dir is not None else DEFAULT_OUTPUT_DIR
+def render_tb6600_stripboard_projection(output_dir=None, stem=STRIPBOARD_ARTIFACT_STEM):
+    if output_dir is None:
+        raise ValueError(
+            "Legacy stripboard projection rendering requires an explicit output_dir; "
+            "the integration diagrams directory is reserved for verified build outputs."
+        )
+    output_dir = Path(output_dir)
     svg_file, png_file = prepare_tb6600_artifact_outputs(
         output_dir,
-        STRIPBOARD_ARTIFACT_STEM,
+        stem,
     )
     schema, assignment = create_stripboard_projection()
     for output_file in (svg_file, png_file):
@@ -70,14 +77,18 @@ def render_tb6600_stripboard_projection(output_dir=None):
 def create_tb6600_verified_stripboard_plan():
     schema = create_schema_for_tb6600_interface()
     circuit = circuit_from_schema(schema, name="pico_tb6600_stripboard_interface")
+    hints = stripboard_hints_from_schema(
+        schema,
+        priority_element_names=TB6600_PRIORITY_ELEMENTS,
+    )
     board = create_stripboard(
-        TB6600_BUILD_BOARD_WIDTH,
-        len(circuit.nets) + len(circuit.components) + TB6600_BUILD_BOARD_EXTRA_ROWS,
+        hints.board_width_pitches,
+        hints.board_height_pitches,
     )
     layout, report = plan_stripboard(
         circuit,
         board=board,
-        hints=stripboard_hints_from_schema(schema),
+        hints=hints,
     )
     if not report.ok:
         raise RuntimeError(report.summary())
@@ -87,6 +98,8 @@ def create_tb6600_verified_stripboard_plan():
 def render_tb6600_stripboard_build(output_dir=None):
     output_dir = Path(output_dir) if output_dir is not None else DEFAULT_OUTPUT_DIR
     _clear_tb6600_build_artifacts(output_dir, STRIPBOARD_ARTIFACT_STEM)
+    for obsolete_stem in OBSOLETE_STRIPBOARD_ARTIFACT_STEMS:
+        _clear_tb6600_build_artifacts(output_dir, obsolete_stem)
     _schema, circuit, layout, report = create_tb6600_verified_stripboard_plan()
     run_id = prepare_tb6600_artifact_outputs(
         output_dir,

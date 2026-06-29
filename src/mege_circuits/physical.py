@@ -14,6 +14,10 @@ from mege_circuits.dsl import Direction, Stripboard, StripboardBlocker, Stripboa
 
 ERROR = "error"
 WARNING = "warning"
+LAYOUT_JUMPER_STROKE = "#dc2626"
+LAYOUT_JUMPER_STROKE_WIDTH = 0.055
+LAYOUT_COMPONENT_BODY_FILL = "#111827"
+LAYOUT_COMPONENT_BODY_LABEL_FILL = "#ffffff"
 
 
 @dataclass(frozen=True)
@@ -170,7 +174,12 @@ class StripboardRoutingHints:
 
     net_rows: Mapping[str, int] = field(default_factory=dict)
     component_columns: Mapping[str, int] = field(default_factory=dict)
+    component_terminal_holes: Mapping[tuple[str, str], tuple[int, int]] = field(
+        default_factory=dict
+    )
     component_order: tuple[str, ...] = ()
+    board_width_pitches: int | None = None
+    board_height_pitches: int | None = None
 
     def __post_init__(self):
         object.__setattr__(
@@ -195,9 +204,32 @@ class StripboardRoutingHints:
         )
         object.__setattr__(
             self,
+            "component_terminal_holes",
+            MappingProxyType(
+                {
+                    (str(refdes), str(terminal_name)): _coerce_grid_point(
+                        hole,
+                        "component terminal hole",
+                    )
+                    for (refdes, terminal_name), hole in (
+                        self.component_terminal_holes or {}
+                    ).items()
+                }
+            ),
+        )
+        object.__setattr__(
+            self,
             "component_order",
             tuple(str(refdes) for refdes in self.component_order),
         )
+        for attr_name in ("board_width_pitches", "board_height_pitches"):
+            value = getattr(self, attr_name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    attr_name,
+                    _coerce_integer(value, attr_name),
+                )
 
 
 @dataclass(frozen=True)
@@ -236,6 +268,26 @@ def default_footprints():
             blockers=((0, 1), (0, 2)),
         ),
         Footprint(
+            name="axial_2pin_span1",
+            component_kinds=("resistor", "fuse", "zener"),
+            pins={"start": (0, 0), "end": (0, 1)},
+            allowed_rotations=(0, 90, 180, 270),
+        ),
+        Footprint(
+            name="axial_2pin_span2",
+            component_kinds=("resistor", "fuse", "zener"),
+            pins={"start": (0, 0), "end": (0, 2)},
+            allowed_rotations=(0, 90, 180, 270),
+            blockers=((0, 1),),
+        ),
+        Footprint(
+            name="axial_2pin_span4",
+            component_kinds=("resistor", "fuse", "zener"),
+            pins={"start": (0, 0), "end": (0, 4)},
+            allowed_rotations=(0, 90, 180, 270),
+            blockers=((0, 1), (0, 2), (0, 3)),
+        ),
+        Footprint(
             name="capacitor_2pin_span2",
             component_kinds=("capacitor",),
             pins={"start": (0, 0), "end": (0, 2)},
@@ -243,18 +295,52 @@ def default_footprints():
             blockers=((0, 1),),
         ),
         Footprint(
+            name="capacitor_2pin_span1",
+            component_kinds=("capacitor",),
+            pins={"start": (0, 0), "end": (0, 1)},
+            allowed_rotations=(0, 90, 180, 270),
+        ),
+        Footprint(
+            name="capacitor_2pin_span4",
+            component_kinds=("capacitor",),
+            pins={"start": (0, 0), "end": (0, 4)},
+            allowed_rotations=(0, 90, 180, 270),
+            blockers=((0, 1), (0, 2), (0, 3)),
+        ),
+        Footprint(
             name="to92_cbe",
             component_kinds=("bjt_npn",),
             pins={"collector": (0, 0), "base": (0, 2), "emitter": (0, 4)},
-            allowed_rotations=(0, 180),
+            allowed_rotations=(0, 90, 180, 270),
             blockers=((0, 1), (0, 3)),
+        ),
+        Footprint(
+            name="to92_cbe_compact",
+            component_kinds=("bjt_npn",),
+            pins={"collector": (0, 0), "base": (0, 1), "emitter": (0, 2)},
+            allowed_rotations=(0, 90, 180, 270),
+            blockers=(),
+        ),
+        Footprint(
+            name="to92_ceb_compact",
+            component_kinds=("bjt_npn",),
+            pins={"collector": (0, 0), "emitter": (0, 1), "base": (0, 2)},
+            allowed_rotations=(0, 90, 180, 270),
+            blockers=(),
         ),
         Footprint(
             name="to220_gds",
             component_kinds=("pmos",),
             pins={"gate": (0, 0), "drain": (0, 2), "source": (0, 4)},
-            allowed_rotations=(0, 180),
+            allowed_rotations=(0, 90, 180, 270),
             blockers=((0, 1), (0, 3)),
+        ),
+        Footprint(
+            name="to220_gds_compact",
+            component_kinds=("pmos",),
+            pins={"gate": (0, 0), "drain": (0, 1), "source": (0, 2)},
+            allowed_rotations=(0, 90, 180, 270),
+            blockers=(),
         ),
     )
 
@@ -368,18 +454,53 @@ def verify_stripboard_layout(layout, circuit):
     return PhysicalVerificationReport(tuple(issues), physical_netlist=physical_netlist)
 
 
-def stripboard_hints_from_schema(schema):
+def stripboard_hints_from_schema(
+    schema,
+    *,
+    compact=True,
+    priority_element_names=(),
+):
     """Derive deterministic routing hints from the legacy schematic projection."""
 
     if not isinstance(schema, dsl.Schema):
         raise TypeError("stripboard_hints_from_schema expects a Schema object.")
+    if not isinstance(compact, bool):
+        raise TypeError("compact must be a bool.")
 
     assignment = dsl.assign_schema_nets_to_stripboard(schema)
+    if compact:
+        try:
+            assignment = dsl.compact_sparse_stripboard_rows(assignment, schema=schema)
+        except ValueError:
+            pass
+        assignment = dsl.compact_stripboard_connections_left(
+            schema,
+            assignment,
+            strict=True,
+        )
+        assignment = dsl.permute_stripboard_rows_for_element_span(
+            schema,
+            assignment,
+            priority_element_names=priority_element_names,
+        )
+
+    element_nets = {
+        (element.name, terminal_name): net_name
+        for element in schema.elements
+        for terminal_name, net_name in element.terminal_nets.items()
+    }
+    component_terminal_holes = {}
     terminal_columns_by_component = {}
     for marker_key, column in assignment.marker_column_maps.items():
         if len(marker_key) != 3 or marker_key[0] != "terminal":
             continue
-        _kind, refdes, _terminal_name = marker_key
+        _kind, refdes, terminal_name = marker_key
+        net_name = element_nets.get((refdes, terminal_name))
+        if net_name in assignment.net_rows:
+            component_terminal_holes[(refdes, terminal_name)] = (
+                assignment.net_rows[net_name],
+                column,
+            )
         terminal_columns_by_component.setdefault(refdes, []).append(column)
 
     component_columns = {}
@@ -400,7 +521,10 @@ def stripboard_hints_from_schema(schema):
     return StripboardRoutingHints(
         net_rows=assignment.net_rows,
         component_columns=component_columns,
+        component_terminal_holes=component_terminal_holes,
         component_order=component_order,
+        board_width_pitches=assignment.stripboard.width_pitches,
+        board_height_pitches=assignment.stripboard.height_pitches,
     )
 
 
@@ -442,7 +566,7 @@ def plan_stripboard(
         return None, _routing_failure_report(str(error))
 
     net_rows = _routing_net_rows(circuit, routing_hints)
-    planned, placement_error = _route_component_placements(
+    planned_states, placement_error = _route_component_placements(
         circuit,
         board,
         footprint_map,
@@ -453,44 +577,67 @@ def plan_stripboard(
     if placement_error is not None:
         return None, _routing_failure_report(placement_error)
 
-    cuts = list(normalized_fixed_cuts)
-    jumpers = list(normalized_fixed_jumpers)
-    for component in circuit.components:
-        placed_component = planned[component.refdes]
-        footprint = footprint_map[placed_component.footprint_name]
-        component_cuts, cut_error = _routing_component_cuts(
-            component,
-            placed_component,
-            footprint,
+    best_layout = None
+    best_report = None
+    best_score = None
+    for planned, placement_score in planned_states:
+        generated_cuts, cut_error = _routing_conflict_cuts(
+            circuit,
+            planned,
+            footprint_map,
+            normalized_fixed_cuts,
         )
         if cut_error is not None:
-            return None, _routing_failure_report(cut_error)
-        cuts.extend(component_cuts)
-        jumpers.extend(
-            _routing_component_jumpers(
-                component,
-                placed_component,
-                footprint,
-                net_rows,
+            continue
+
+        try:
+            base_layout = create_manual_stripboard_layout(
+                circuit,
+                board=board,
+                footprints=tuple(footprint_map[name] for name in sorted(footprint_map)),
+                placements=planned,
+                cuts=_dedupe_cuts((*normalized_fixed_cuts, *generated_cuts)),
+                jumpers=_dedupe_jumpers(normalized_fixed_jumpers),
             )
-        )
+        except (TypeError, ValueError):
+            continue
 
-    try:
-        layout = create_manual_stripboard_layout(
-            circuit,
-            board=board,
-            footprints=tuple(footprint_map[name] for name in sorted(footprint_map)),
-            placements=planned,
-            cuts=_dedupe_cuts(cuts),
-            jumpers=_dedupe_jumpers(jumpers),
-        )
-    except (TypeError, ValueError) as error:
-        return None, _routing_failure_report(str(error))
+        base_report = verify_stripboard_layout(base_layout, circuit)
+        if _routing_report_has_unfixable_errors(base_report):
+            report = base_report
+            layout = base_layout
+        else:
+            generated_jumpers = _routing_connectivity_jumpers(
+                base_report.physical_netlist
+            )
+            try:
+                layout = create_manual_stripboard_layout(
+                    circuit,
+                    board=board,
+                    footprints=tuple(
+                        footprint_map[name] for name in sorted(footprint_map)
+                    ),
+                    placements=planned,
+                    cuts=base_layout.cuts,
+                    jumpers=_dedupe_jumpers(
+                        (*normalized_fixed_jumpers, *generated_jumpers)
+                    ),
+                )
+            except (TypeError, ValueError):
+                continue
+            report = verify_stripboard_layout(layout, circuit)
 
-    report = verify_stripboard_layout(layout, circuit)
-    if not report.ok:
-        return layout, report
-    return layout, report
+        score = _routing_layout_score(layout, report, placement_score)
+        if best_score is None or score < best_score:
+            best_layout = layout
+            best_report = report
+            best_score = score
+
+    if best_layout is not None:
+        return best_layout, best_report
+    return None, _routing_failure_report(
+        "No verified stripboard routing candidate could be built."
+    )
 
 
 def score_stripboard_layout(layout, circuit, report=None):
@@ -613,7 +760,7 @@ def write_stripboard_build_json(layout, circuit, report, file):
     )
 
 
-def render_stripboard_layout(layout, circuit, file, scale=32):
+def render_stripboard_layout(layout, circuit, file, scale=32, *, detail="assembly"):
     """Render a manual physical stripboard layout as SVG or PNG."""
 
     if not isinstance(layout, PhysicalLayout):
@@ -622,15 +769,16 @@ def render_stripboard_layout(layout, circuit, file, scale=32):
         raise TypeError("render_stripboard_layout expects a Circuit object.")
     if layout.board.strip_direction is not Direction.HORIZONTAL:
         raise NotImplementedError("Only horizontal stripboards are supported for now.")
+    detail = _validate_layout_detail(detail)
 
     _validate_layout_geometry(layout, circuit, _footprints_by_name(layout.footprints))
 
     path = Path(file)
     suffix = path.suffix.lower()
     if suffix == ".svg":
-        _render_stripboard_layout_svg(layout, circuit, path, scale)
+        _render_stripboard_layout_svg(layout, circuit, path, scale, detail)
     elif suffix == ".png":
-        _render_stripboard_layout_png(layout, circuit, path, scale)
+        _render_stripboard_layout_png(layout, circuit, path, scale, detail)
     else:
         raise ValueError("Stripboard layout output file must end in .svg or .png.")
 
@@ -1157,23 +1305,22 @@ def _bottom_view_col(board, col):
 
 
 def footprint_for_component(component, footprints):
-    """Return the single footprint matching a component kind."""
+    """Return the preferred footprint matching a component kind."""
 
     if not isinstance(component, Component):
         raise TypeError("footprint_for_component expects a Component object.")
-    matches = tuple(
-        footprint
-        for footprint in _footprints_by_name(footprints).values()
-        if component.kind in footprint.component_kinds
-    )
+    matches = _footprints_for_component(component, _footprints_by_name(footprints))
     if not matches:
         raise ValueError(f"No footprint supports component kind {component.kind!r}.")
-    if len(matches) > 1:
-        names = tuple(footprint.name for footprint in matches)
-        raise ValueError(
-            f"Component kind {component.kind!r} has multiple matching footprints: {names}."
-        )
     return matches[0]
+
+
+def _footprints_for_component(component, footprint_map):
+    return tuple(
+        footprint
+        for footprint in footprint_map.values()
+        if component.kind in footprint.component_kinds
+    )
 
 
 def _validate_physical_inputs(layout, circuit):
@@ -1214,17 +1361,18 @@ def _normalize_fixed_placements(fixed_placements, circuit, footprint_map):
 
 def _routing_net_rows(circuit, hints):
     hinted_rows = hints.net_rows
-    net_names = tuple(net.name for net in circuit.nets)
-    ordered_net_names = tuple(
-        sorted(
-            net_names,
-            key=lambda name: (
-                hinted_rows.get(name, len(hinted_rows)),
-                name,
-            ),
-        )
-    )
-    return {net_name: row for row, net_name in enumerate(ordered_net_names)}
+    net_rows = {
+        net.name: hinted_rows[net.name]
+        for net in circuit.nets
+        if net.name in hinted_rows
+    }
+    next_row = max(net_rows.values(), default=-1) + 1
+    for net_name in sorted(
+        net.name for net in circuit.nets if net.name not in net_rows
+    ):
+        net_rows[net_name] = next_row
+        next_row += 1
+    return net_rows
 
 
 def _route_component_placements(
@@ -1238,48 +1386,84 @@ def _route_component_placements(
     components_by_refdes = {
         component.refdes: component for component in circuit.components
     }
-    planned = dict(fixed_placements)
     ordered_refdeses = _routing_component_order(circuit, hints)
-    next_row = len(net_rows)
-
-    fixed_rows = []
-    for placed_component in fixed_placements.values():
-        footprint = footprint_map[placed_component.footprint_name]
-        fixed_rows.extend(
-            row for row, _col in _absolute_footprint_holes(placed_component, footprint)
-        )
-    if fixed_rows:
-        next_row = max(next_row, max(fixed_rows) + 1)
+    preferred_columns = _routing_preferred_component_columns(
+        circuit,
+        board,
+        hints,
+        ordered_refdeses,
+    )
+    terminal_targets = _routing_terminal_targets(
+        circuit,
+        board,
+        hints,
+        net_rows,
+        preferred_columns,
+    )
+    initial_state, initial_error = _routing_initial_placement_state(
+        fixed_placements,
+        components_by_refdes,
+        footprint_map,
+        board,
+    )
+    if initial_error is not None:
+        return None, initial_error
+    states = (initial_state,)
 
     for refdes in ordered_refdeses:
-        if refdes in planned:
+        if refdes in fixed_placements:
             continue
         component = components_by_refdes[refdes]
-        try:
-            footprint = footprint_for_component(component, footprint_map)
-        except ValueError as error:
-            return None, str(error)
-        if next_row >= board.height_pitches:
-            return None, (
-                f"Board has {board.height_pitches} rows, but routing "
-                f"{refdes!r} needs component row {next_row}."
-            )
-        placed_component, error = _route_single_component_placement(
+        candidates, candidate_error = _routing_component_candidates(
             component,
-            footprint,
             board,
-            row=next_row,
-            preferred_column=hints.component_columns.get(refdes, 0),
+            footprint_map,
+            terminal_targets.get(refdes, {}),
+            preferred_columns.get(refdes, 0),
         )
-        if error is not None:
-            return None, error
-        planned[refdes] = placed_component
-        next_row += 1
+        if candidate_error is not None:
+            return None, candidate_error
+        next_states = []
+        for state_score, state_planned, state_pins, state_blockers in states:
+            for (
+                candidate_score,
+                placed_component,
+                pin_holes,
+                blocker_holes,
+            ) in candidates:
+                if state_pins & pin_holes:
+                    continue
+                if state_pins & blocker_holes:
+                    continue
+                if state_blockers & pin_holes:
+                    continue
+                planned = dict(state_planned)
+                planned[refdes] = placed_component
+                next_states.append(
+                    (
+                        _add_routing_scores(state_score, candidate_score),
+                        planned,
+                        frozenset((*state_pins, *pin_holes)),
+                        frozenset((*state_blockers, *blocker_holes)),
+                    )
+                )
+        if not next_states:
+            return None, (
+                f"No collision-free placement is available for {refdes!r} "
+                f"on a {board.width_pitches}x{board.height_pitches} board."
+            )
+        states = tuple(
+            sorted(next_states, key=lambda state: state[0])[: _routing_beam_width()]
+        )
 
-    missing = tuple(sorted(set(components_by_refdes) - set(planned)))
-    if missing:
-        return None, f"Missing routed placements for components {missing}."
-    return planned, None
+    planned_states = tuple(
+        (planned, score)
+        for score, planned, _pin_holes, _blocker_holes in sorted(
+            states,
+            key=lambda state: state[0],
+        )
+    )
+    return planned_states, None
 
 
 def _routing_component_order(circuit, hints):
@@ -1295,39 +1479,298 @@ def _routing_component_order(circuit, hints):
     return tuple((*ordered, *remaining))
 
 
-def _route_single_component_placement(
-    component, footprint, board, row, preferred_column
-):
-    for rotation in _preferred_footprint_rotations(footprint):
-        relative_points = tuple(
-            _rotate_grid_point(point, rotation) for point in footprint.pins.values()
+def _routing_preferred_component_columns(circuit, board, hints, ordered_refdeses):
+    spread_columns = {}
+    denominator = max(1, len(ordered_refdeses) + 1)
+    for index, refdes in enumerate(ordered_refdeses, start=1):
+        spread_columns[refdes] = int(
+            round(index * (board.width_pitches - 1) / denominator)
         )
-        if {point[0] for point in relative_points} != {0}:
-            continue
-        min_col = min(point[1] for point in relative_points)
-        max_col = max(point[1] for point in relative_points)
-        width = max_col - min_col + 1
-        if width > board.width_pitches:
-            continue
-        origin_col = int(
+    return {
+        component.refdes: int(
             _clamp(
-                preferred_column - min_col,
-                -min_col,
-                board.width_pitches - 1 - max_col,
+                hints.component_columns.get(
+                    component.refdes,
+                    spread_columns.get(component.refdes, 0),
+                ),
+                0,
+                board.width_pitches - 1,
             )
         )
-        placed_component = PlacedComponent(
-            refdes=component.refdes,
-            footprint_name=footprint.name,
-            origin=(row, origin_col),
-            rotation=rotation,
+        for component in circuit.components
+    }
+
+
+def _routing_terminal_targets(circuit, board, hints, net_rows, preferred_columns):
+    targets = {}
+    for component in circuit.components:
+        component_targets = {}
+        preferred_col = preferred_columns.get(component.refdes, 0)
+        for terminal in component.terminals:
+            hinted_hole = hints.component_terminal_holes.get(
+                (component.refdes, terminal.name)
+            )
+            if hinted_hole is not None:
+                row, col = hinted_hole
+                component_targets[terminal.name] = (
+                    int(_clamp(row, 0, board.height_pitches - 1)),
+                    int(_clamp(col, 0, board.width_pitches - 1)),
+                )
+                continue
+            component_targets[terminal.name] = (
+                int(
+                    _clamp(
+                        net_rows.get(terminal.net_name, 0),
+                        0,
+                        board.height_pitches - 1,
+                    )
+                ),
+                preferred_col,
+            )
+        targets[component.refdes] = component_targets
+    return targets
+
+
+def _routing_initial_placement_state(
+    fixed_placements,
+    components_by_refdes,
+    footprint_map,
+    board,
+):
+    planned = {}
+    pin_holes = frozenset()
+    blocker_holes = frozenset()
+    for refdes, placed_component in fixed_placements.items():
+        component = components_by_refdes[refdes]
+        footprint = _require_footprint(footprint_map, placed_component.footprint_name)
+        pins, blockers = _routing_placement_holes(
+            component,
+            placed_component,
+            footprint,
         )
-        if not _routing_component_isolatable(component, placed_component, footprint):
+        outside = tuple(
+            hole
+            for hole in (*pins, *blockers)
+            if not _hole_on_board(board, hole[0], hole[1])
+        )
+        if outside:
+            return None, (
+                f"Fixed placement for {refdes!r} has holes outside the board: "
+                f"{outside}."
+            )
+        if pin_holes & pins:
+            return None, f"Fixed placement for {refdes!r} collides with another pin."
+        if pin_holes & blockers or blocker_holes & pins:
+            return None, f"Fixed placement for {refdes!r} collides with a body blocker."
+        planned[refdes] = placed_component
+        pin_holes = frozenset((*pin_holes, *pins))
+        blocker_holes = frozenset((*blocker_holes, *blockers))
+    return ((_routing_zero_score(), planned, pin_holes, blocker_holes), None)
+
+
+def _routing_component_candidates(
+    component,
+    board,
+    footprint_map,
+    terminal_targets,
+    preferred_column,
+):
+    candidates = []
+    compatible_footprints = _footprints_for_component(component, footprint_map)
+    if not compatible_footprints:
+        return (), f"No footprint supports component kind {component.kind!r}."
+
+    for footprint_index, footprint in enumerate(compatible_footprints):
+        try:
+            _validate_component_footprint(component, footprint)
+        except ValueError:
             continue
-        return placed_component, None
-    return None, (
-        f"No horizontal, cut-isolatable placement is available for "
-        f"{component.refdes!r} with footprint {footprint.name!r}."
+        for rotation_index, rotation in enumerate(
+            _preferred_footprint_rotations(footprint)
+        ):
+            base_origins = _routing_candidate_base_origins(
+                component,
+                footprint,
+                rotation,
+                terminal_targets,
+                preferred_column,
+            )
+            for origin in _routing_shifted_origins(
+                base_origins,
+                board,
+                footprint,
+                rotation,
+            ):
+                placed_component = PlacedComponent(
+                    refdes=component.refdes,
+                    footprint_name=footprint.name,
+                    origin=origin,
+                    rotation=rotation,
+                )
+                pin_holes, blocker_holes = _routing_placement_holes(
+                    component,
+                    placed_component,
+                    footprint,
+                )
+                if any(
+                    not _hole_on_board(board, hole[0], hole[1])
+                    for hole in (*pin_holes, *blocker_holes)
+                ):
+                    continue
+                score = _routing_candidate_score(
+                    component,
+                    placed_component,
+                    footprint,
+                    terminal_targets,
+                    preferred_column,
+                    footprint_index,
+                    rotation_index,
+                )
+                candidates.append((score, placed_component, pin_holes, blocker_holes))
+
+    candidates = tuple(sorted(candidates, key=lambda item: item[0]))
+    if not candidates:
+        return (), (
+            f"No legal placement candidates are available for {component.refdes!r} "
+            f"on a {board.width_pitches}x{board.height_pitches} board."
+        )
+    return candidates[: _routing_candidate_limit()], None
+
+
+def _routing_candidate_base_origins(
+    component,
+    footprint,
+    rotation,
+    terminal_targets,
+    preferred_column,
+):
+    origins = set()
+    rotated_pins = {
+        terminal_name: _rotate_grid_point(point, rotation)
+        for terminal_name, point in footprint.pins.items()
+    }
+    for terminal in component.terminals:
+        target = terminal_targets.get(terminal.name)
+        rotated_pin = rotated_pins.get(terminal.name)
+        if target is None or rotated_pin is None:
+            continue
+        origins.add((target[0] - rotated_pin[0], target[1] - rotated_pin[1]))
+
+    if terminal_targets:
+        target_rows = [hole[0] for hole in terminal_targets.values()]
+        target_cols = [hole[1] for hole in terminal_targets.values()]
+        pin_rows = [point[0] for point in rotated_pins.values()]
+        pin_cols = [point[1] for point in rotated_pins.values()]
+        origins.add(
+            (
+                round(
+                    sum(target_rows) / len(target_rows) - sum(pin_rows) / len(pin_rows)
+                ),
+                round(
+                    sum(target_cols) / len(target_cols) - sum(pin_cols) / len(pin_cols)
+                ),
+            )
+        )
+        origins.add(
+            (min(target_rows) - min(pin_rows), preferred_column - min(pin_cols))
+        )
+        origins.add(
+            (max(target_rows) - max(pin_rows), preferred_column - max(pin_cols))
+        )
+
+    if not origins:
+        origins.add((0, preferred_column))
+    return tuple(sorted(origins))
+
+
+def _routing_shifted_origins(base_origins, board, footprint, rotation):
+    rotated_points = tuple(
+        _rotate_grid_point(point, rotation)
+        for point in (*footprint.pins.values(), *footprint.blockers)
+    )
+    if not rotated_points:
+        return ()
+    min_row = min(point[0] for point in rotated_points)
+    max_row = max(point[0] for point in rotated_points)
+    min_col = min(point[1] for point in rotated_points)
+    max_col = max(point[1] for point in rotated_points)
+    row_low = -min_row
+    row_high = board.height_pitches - 1 - max_row
+    col_low = -min_col
+    col_high = board.width_pitches - 1 - max_col
+    origins = set()
+    for row, col in base_origins:
+        for row_offset in _routing_small_offsets():
+            shifted_row = row + row_offset
+            if shifted_row < row_low or shifted_row > row_high:
+                continue
+            for col_offset in _routing_column_offsets(board.width_pitches):
+                shifted_col = col + col_offset
+                if shifted_col < col_low or shifted_col > col_high:
+                    continue
+                origins.add((shifted_row, shifted_col))
+    return tuple(sorted(origins))
+
+
+def _routing_placement_holes(component, placed_component, footprint):
+    pin_holes = frozenset(
+        _absolute_footprint_point(
+            placed_component.origin,
+            placed_component.rotation,
+            footprint.pins[terminal.name],
+        )
+        for terminal in component.terminals
+    )
+    blocker_holes = frozenset(
+        _absolute_footprint_point(
+            placed_component.origin,
+            placed_component.rotation,
+            point,
+        )
+        for point in footprint.blockers
+    )
+    return pin_holes, blocker_holes - pin_holes
+
+
+def _routing_candidate_score(
+    component,
+    placed_component,
+    footprint,
+    terminal_targets,
+    preferred_column,
+    footprint_index,
+    rotation_index,
+):
+    distances = []
+    row_distances = []
+    exact_matches = 0
+    row_net_conflicts = 0
+    pins_by_row = {}
+    pin_cols = []
+    pin_rows = []
+    for pin, row, col in _component_route_pins(component, placed_component, footprint):
+        target = terminal_targets.get(pin.terminal_name, (row, col))
+        distance = abs(row - target[0]) + abs(col - target[1])
+        distances.append(distance)
+        row_distances.append(abs(row - target[0]))
+        exact_matches += int(distance == 0)
+        pins_by_row.setdefault(row, set()).add(pin.net_name)
+        pin_rows.append(row)
+        pin_cols.append(col)
+    for net_names in pins_by_row.values():
+        if len(net_names) > 1:
+            row_net_conflicts += len(net_names) - 1
+    center_col = round(sum(pin_cols) / len(pin_cols)) if pin_cols else preferred_column
+    return (
+        sum(row_distances),
+        sum(distances),
+        -exact_matches,
+        row_net_conflicts,
+        abs(center_col - preferred_column),
+        max(pin_rows, default=0) - min(pin_rows, default=0),
+        max(pin_cols, default=0) - min(pin_cols, default=0),
+        footprint_index,
+        rotation_index,
     )
 
 
@@ -1338,18 +1781,6 @@ def _preferred_footprint_rotations(footprint):
         for rotation in preferred
         if rotation in set(footprint.allowed_rotations)
     )
-
-
-def _routing_component_isolatable(component, placed_component, footprint):
-    pins_by_row = _component_route_pins_by_row(component, placed_component, footprint)
-    for row_pins in pins_by_row.values():
-        sorted_pins = sorted(row_pins, key=lambda item: item[2])
-        for left, right in zip(sorted_pins, sorted_pins[1:]):
-            if left[0].net_name == right[0].net_name:
-                continue
-            if right[2] - left[2] < 2:
-                return False
-    return True
 
 
 def _routing_component_cuts(component, placed_component, footprint):
@@ -1412,6 +1843,147 @@ def _component_route_pins(component, placed_component, footprint):
             row,
             col,
         )
+
+
+def _routing_conflict_cuts(circuit, planned, footprint_map, fixed_cuts):
+    cuts_by_hole = {(cut.row, cut.col): cut for cut in fixed_cuts}
+    pins_by_row = {}
+    for component in circuit.components:
+        placed_component = planned[component.refdes]
+        footprint = footprint_map[placed_component.footprint_name]
+        for pin, row, col in _component_route_pins(
+            component, placed_component, footprint
+        ):
+            pins_by_row.setdefault(row, []).append((pin, col))
+
+    for row, row_pins in pins_by_row.items():
+        sorted_pins = sorted(row_pins, key=lambda item: item[1])
+        pin_columns = {col for _pin, col in sorted_pins}
+        for left, right in zip(sorted_pins, sorted_pins[1:]):
+            left_pin, left_col = left
+            right_pin, right_col = right
+            if left_pin.net_name == right_pin.net_name:
+                continue
+            if _routing_pins_separated_by_cut(row, left_col, right_col, cuts_by_hole):
+                continue
+            cut_col = _first_cut_column_between(left_col, right_col, pin_columns)
+            if cut_col is None:
+                return (), (
+                    f"Cannot isolate row {row} pins {left_pin.refdes}."
+                    f"{left_pin.terminal_name} and {right_pin.refdes}."
+                    f"{right_pin.terminal_name}; there is no empty cut hole "
+                    "between them."
+                )
+            cuts_by_hole[(row, cut_col)] = StripboardCut(row=row, col=cut_col)
+    return tuple(cuts_by_hole[key] for key in sorted(cuts_by_hole)), None
+
+
+def _routing_pins_separated_by_cut(row, left_col, right_col, cuts_by_hole):
+    return any(
+        cut_row == row and left_col < cut_col < right_col
+        for cut_row, cut_col in cuts_by_hole
+    )
+
+
+def _routing_report_has_unfixable_errors(report):
+    return any(issue.code != "open_circuit" for issue in report.errors)
+
+
+def _routing_connectivity_jumpers(physical_netlist):
+    if physical_netlist is None:
+        return ()
+    jumpers = []
+    conductors_by_net = {}
+    for conductor in physical_netlist.conductors:
+        for net_name in conductor.net_names:
+            if len(conductor.net_names) == 1:
+                conductors_by_net.setdefault(net_name, []).append(conductor)
+
+    for net_name, conductors in sorted(conductors_by_net.items()):
+        if len(conductors) < 2:
+            continue
+        anchor = max(
+            conductors,
+            key=lambda conductor: (
+                len(_conductor_pins_for_net(conductor, net_name)),
+                -conductor.index,
+            ),
+        )
+        for conductor in conductors:
+            if conductor.index == anchor.index:
+                continue
+            start, end = _shortest_conductor_pin_link(anchor, conductor, net_name)
+            jumpers.append(Jumper(start=start, end=end, net_name=net_name))
+    return tuple(jumpers)
+
+
+def _conductor_pins_for_net(conductor, net_name):
+    return tuple(pin for pin in conductor.pins if pin.net_name == net_name)
+
+
+def _shortest_conductor_pin_link(anchor, conductor, net_name):
+    anchor_pins = _conductor_pins_for_net(anchor, net_name)
+    conductor_pins = _conductor_pins_for_net(conductor, net_name)
+    if not anchor_pins or not conductor_pins:
+        raise ValueError(f"Cannot route jumper for net {net_name!r}; no pins found.")
+    return min(
+        (
+            (pin.hole, anchor_pin.hole)
+            for pin in conductor_pins
+            for anchor_pin in anchor_pins
+        ),
+        key=lambda holes: _hole_distance(holes[0], holes[1]),
+    )
+
+
+def _routing_layout_score(layout, report, placement_score):
+    return (
+        int(not report.ok),
+        len(report.errors),
+        len(layout.cuts),
+        len(layout.jumpers),
+        _layout_used_height(layout),
+        _layout_jumper_length(layout),
+        *placement_score,
+        _layout_used_width(layout),
+    )
+
+
+def _layout_jumper_length(layout):
+    return sum(_hole_distance(jumper.start, jumper.end) for jumper in layout.jumpers)
+
+
+def _hole_distance(left, right):
+    return abs(left[0] - right[0]) + abs(left[1] - right[1])
+
+
+def _routing_zero_score():
+    return (0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+
+def _add_routing_scores(left, right):
+    return tuple(
+        left_value + right_value for left_value, right_value in zip(left, right)
+    )
+
+
+def _routing_beam_width():
+    return 256
+
+
+def _routing_candidate_limit():
+    return 192
+
+
+def _routing_small_offsets():
+    return (0, -1, 1, -2, 2)
+
+
+def _routing_column_offsets(width):
+    offsets = [0]
+    for distance in range(1, max(1, width)):
+        offsets.extend((-distance, distance))
+    return tuple(offsets)
 
 
 def _absolute_footprint_holes(placed_component, footprint):
@@ -2212,20 +2784,29 @@ def _validate_layout_geometry(layout, circuit, footprint_map):
         _require_footprint(footprint_map, placed_component.footprint_name)
 
 
-def _render_stripboard_layout_svg(layout, circuit, path, scale):
+def _validate_layout_detail(detail):
+    detail = str(detail)
+    if detail not in {"assembly", "annotated"}:
+        raise ValueError("Stripboard layout detail must be 'assembly' or 'annotated'.")
+    return detail
+
+
+def _render_stripboard_layout_svg(layout, circuit, path, scale, detail):
     scale = dsl._validate_render_scale(scale)
     width, height = dsl._stripboard_size(layout.board)
-    width_px = width * scale
-    height_px = height * scale
     pins = placed_component_pins(layout, circuit)
-    labels = _placed_layout_labels(layout, circuit, pins)
+    labels = _placed_layout_labels(layout, circuit, pins, detail)
+    label_margin = _layout_label_margin(labels)
+    width_px = (width + label_margin) * scale
+    height_px = height * scale
 
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         (
             f'<svg xmlns="http://www.w3.org/2000/svg" '
             f'width="{width_px:.0f}" height="{height_px:.0f}" '
-            f'viewBox="0 0 {width:.3f} {height:.3f}">'
+            f'viewBox="{-label_margin:.3f} 0 '
+            f'{width + label_margin:.3f} {height:.3f}">'
         ),
         "  <title>Manual Stripboard Layout</title>",
         (
@@ -2238,9 +2819,11 @@ def _render_stripboard_layout_svg(layout, circuit, path, scale):
     _append_svg_board(lines, layout.board)
     _append_svg_layout_cuts(lines, layout.cuts)
     _append_svg_layout_jumpers(lines, layout.jumpers)
-    _append_svg_layout_components(lines, layout, circuit, pins)
-    _append_svg_layout_blockers(lines, layout.blockers)
+    _append_svg_layout_components(lines, layout, circuit, pins, detail)
+    if detail == "annotated":
+        _append_svg_layout_blockers(lines, layout.blockers)
     _append_svg_layout_pins(lines, pins)
+    _append_svg_layout_terminal_hole_labels(lines, pins)
     for label in labels:
         lines.append(dsl._svg_stripboard_overlay_label(label))
     lines.append("</svg>")
@@ -2297,14 +2880,16 @@ def _append_svg_layout_jumpers(lines, jumpers):
             f'data-end-row="{jumper.end[0]}" data-end-col="{jumper.end[1]}" '
             f'x1="{start[0]:.3f}" y1="{start[1]:.3f}" '
             f'x2="{end[0]:.3f}" y2="{end[1]:.3f}" '
-            f'stroke="{dsl.STRIPBOARD_OVERLAY_NODE_FILL}" '
-            f'stroke-width="{dsl.STRIPBOARD_OVERLAY_STROKE_WIDTH * 1.35:.3f}" '
-            f'stroke-linecap="round" stroke-dasharray="0.180 0.120"/>'
+            f'stroke="{LAYOUT_JUMPER_STROKE}" '
+            f'stroke-width="{LAYOUT_JUMPER_STROKE_WIDTH:.3f}" '
+            f'stroke-linecap="round"/>'
         )
 
 
-def _append_svg_layout_components(lines, layout, circuit, pins):
+def _append_svg_layout_components(lines, layout, circuit, pins, detail):
     for overlay in _layout_component_overlays(layout, circuit, pins):
+        if detail == "assembly":
+            _append_svg_layout_component_body(lines, overlay)
         for start, end in overlay["segments"]:
             lines.append(
                 f'  <line class="layout-component" '
@@ -2315,6 +2900,27 @@ def _append_svg_layout_components(lines, layout, circuit, pins):
                 f'stroke="{dsl.STRIPBOARD_OVERLAY_ELEMENT_STROKE}" '
                 f'stroke-width="{dsl.STRIPBOARD_OVERLAY_STROKE_WIDTH:.3f}"/>'
             )
+
+
+def _append_svg_layout_component_body(lines, overlay):
+    x, y = overlay["body_center"]
+    radius = 0.300 if overlay["kind"] in {"bjt_npn", "pmos"} else 0.165
+    font_size = 0.210 if overlay["kind"] in {"bjt_npn", "pmos"} else 0.165
+    lines.append(
+        f'  <circle class="layout-component-body" '
+        f'data-element="{dsl._svg_attr(overlay["refdes"])}" '
+        f'data-footprint="{dsl._svg_attr(overlay["footprint_name"])}" '
+        f'cx="{x:.3f}" cy="{y:.3f}" r="{radius:.3f}" '
+        f'fill="{LAYOUT_COMPONENT_BODY_FILL}"/>'
+    )
+    lines.append(
+        f'  <text class="layout-component-body-label" '
+        f'data-element="{dsl._svg_attr(overlay["refdes"])}" '
+        f'x="{x:.3f}" y="{y + 0.055:.3f}" '
+        f'font-size="{font_size:.3f}" font-weight="800" text-anchor="middle" '
+        f'fill="{LAYOUT_COMPONENT_BODY_LABEL_FILL}">'
+        f'{dsl._svg_text(overlay["refdes"])}</text>'
+    )
 
 
 def _append_svg_layout_blockers(lines, blockers):
@@ -2345,7 +2951,23 @@ def _append_svg_layout_pins(lines, pins):
         )
 
 
-def _render_stripboard_layout_png(layout, circuit, path, scale):
+def _append_svg_layout_terminal_hole_labels(lines, pins):
+    for pin in pins:
+        x, y = dsl._stripboard_hole_position(pin.hole)
+        lines.append(
+            f'  <text class="layout-terminal-hole-label" '
+            f'data-net="{dsl._svg_attr(pin.net_name)}" '
+            f'data-element="{dsl._svg_attr(pin.refdes)}" '
+            f'data-terminal="{dsl._svg_attr(pin.terminal_name)}" '
+            f'data-row="{pin.row}" data-col="{pin.col}" '
+            f'x="{x:.3f}" y="{y + 0.045:.3f}" '
+            f'font-size="0.145" font-weight="800" text-anchor="middle" '
+            f'fill="{LAYOUT_COMPONENT_BODY_LABEL_FILL}">'
+            f"{dsl._svg_text(_terminal_label(pin.terminal_name))}</text>"
+        )
+
+
+def _render_stripboard_layout_png(layout, circuit, path, scale, detail):
     scale = dsl._validate_render_scale(scale)
     try:
         from PIL import Image, ImageDraw
@@ -2355,86 +2977,154 @@ def _render_stripboard_layout_png(layout, circuit, path, scale):
         ) from error
 
     width, height = dsl._stripboard_size(layout.board)
-    image_width = max(1, int(round(width * scale)))
+    pins = placed_component_pins(layout, circuit)
+    labels = _placed_layout_labels(layout, circuit, pins, detail)
+    label_margin = _layout_label_margin(labels)
+    image_width = max(1, int(round((width + label_margin) * scale)))
     image_height = max(1, int(round(height * scale)))
     image = Image.new("RGB", (image_width, image_height), "white")
     draw = ImageDraw.Draw(image)
-    dsl._draw_stripboard_base_png(draw, layout.board, scale)
+    board_image = Image.new(
+        "RGB",
+        (
+            max(1, int(round(width * scale))),
+            image_height,
+        ),
+        "white",
+    )
+    dsl._draw_stripboard_base_png(ImageDraw.Draw(board_image), layout.board, scale)
+    image.paste(board_image, (int(round(label_margin * scale)), 0))
 
     for cut in layout.cuts:
-        dsl._draw_stripboard_cut_png(draw, cut, 0.0, scale)
+        dsl._draw_stripboard_cut_png(draw, cut, label_margin, scale)
 
-    jumper_width = max(
-        1, int(round(dsl.STRIPBOARD_OVERLAY_STROKE_WIDTH * 1.35 * scale))
-    )
+    jumper_width = max(1, int(round(LAYOUT_JUMPER_STROKE_WIDTH * scale)))
     for jumper in layout.jumpers:
         draw.line(
             [
-                dsl._px_point(dsl._stripboard_hole_position(jumper.start), scale),
-                dsl._px_point(dsl._stripboard_hole_position(jumper.end), scale),
+                dsl._px_point(
+                    dsl._offset_point(
+                        dsl._stripboard_hole_position(jumper.start),
+                        label_margin,
+                        0,
+                    ),
+                    scale,
+                ),
+                dsl._px_point(
+                    dsl._offset_point(
+                        dsl._stripboard_hole_position(jumper.end),
+                        label_margin,
+                        0,
+                    ),
+                    scale,
+                ),
             ],
-            fill=dsl.STRIPBOARD_OVERLAY_NODE_FILL,
+            fill=LAYOUT_JUMPER_STROKE,
             width=jumper_width,
         )
 
     element_width = dsl._px_overlay_stroke(scale)
-    pins = placed_component_pins(layout, circuit)
     for overlay in _layout_component_overlays(layout, circuit, pins):
+        if detail == "assembly":
+            _draw_layout_component_body_png(image, draw, overlay, label_margin, scale)
         for start, end in overlay["segments"]:
             draw.line(
-                [dsl._px_point(start, scale), dsl._px_point(end, scale)],
+                [
+                    dsl._px_point(dsl._offset_point(start, label_margin, 0), scale),
+                    dsl._px_point(dsl._offset_point(end, label_margin, 0), scale),
+                ],
                 fill=dsl.STRIPBOARD_OVERLAY_ELEMENT_STROKE,
                 width=element_width,
             )
 
-    for blocker in layout.blockers:
-        center = dsl._stripboard_hole_position((blocker.row, blocker.col))
-        radius = dsl.STRIPBOARD_OVERLAY_TERMINAL_RADIUS * 0.95
-        draw.rectangle(
-            dsl._px_rect(
-                center[0] - radius, center[1] - radius, radius * 2, radius * 2, scale
-            ),
-            fill=dsl.STRIPBOARD_OVERLAY_ELEMENT_STROKE,
-        )
+    if detail == "annotated":
+        for blocker in layout.blockers:
+            center = dsl._offset_point(
+                dsl._stripboard_hole_position((blocker.row, blocker.col)),
+                label_margin,
+                0,
+            )
+            radius = dsl.STRIPBOARD_OVERLAY_TERMINAL_RADIUS * 0.95
+            draw.rectangle(
+                dsl._px_rect(
+                    center[0] - radius,
+                    center[1] - radius,
+                    radius * 2,
+                    radius * 2,
+                    scale,
+                ),
+                fill=dsl.STRIPBOARD_OVERLAY_ELEMENT_STROKE,
+            )
 
     for pin in pins:
         dsl._draw_px_circle(
             draw,
-            dsl._stripboard_hole_position(pin.hole),
+            dsl._offset_point(
+                dsl._stripboard_hole_position(pin.hole),
+                label_margin,
+                0,
+            ),
             dsl.STRIPBOARD_OVERLAY_TERMINAL_RADIUS,
             scale,
             fill=dsl.STRIPBOARD_OVERLAY_TERMINAL_FILL,
         )
+        _draw_layout_terminal_hole_label_png(image, pin, label_margin, scale)
 
-    for label in _placed_layout_labels(layout, circuit, pins):
-        dsl._draw_stripboard_overlay_label_png(image, label, 0.0, scale)
+    for label in labels:
+        dsl._draw_stripboard_overlay_label_png(image, label, label_margin, scale)
 
     image.save(path)
 
 
-def _placed_layout_labels(layout, circuit, pins):
-    labels = []
-    for pin in pins:
-        x, y = dsl._stripboard_hole_position(pin.hole)
-        labels.append(
-            dsl._StripboardOverlayLabel(
-                class_name="layout-pin-label",
-                text=_terminal_label(pin.terminal_name),
-                x=x + 0.155,
-                y=y - 0.125,
-                font_size=dsl.STRIPBOARD_OVERLAY_TERMINAL_LABEL_SIZE,
-                font_weight="800",
-                text_anchor="middle",
-                data_attrs=(
-                    ("data-net", pin.net_name),
-                    ("data-element", pin.refdes),
-                    ("data-terminal", pin.terminal_name),
-                ),
-                collision_priority=1,
-                candidates=dsl._stripboard_terminal_label_candidates(x, y),
-            )
-        )
+def _draw_layout_component_body_png(image, draw, overlay, label_margin, scale):
+    center = dsl._offset_point(overlay["body_center"], label_margin, 0)
+    radius = 0.300 if overlay["kind"] in {"bjt_npn", "pmos"} else 0.165
+    font_size = 0.210 if overlay["kind"] in {"bjt_npn", "pmos"} else 0.165
+    dsl._draw_px_circle(
+        draw,
+        center,
+        radius,
+        scale,
+        fill=LAYOUT_COMPONENT_BODY_FILL,
+    )
+    dsl._draw_png_text_rotated(
+        image,
+        (center[0], center[1] + 0.005),
+        overlay["refdes"],
+        font=dsl._overlay_png_font(scale, font_size),
+        scale=scale,
+        fill=LAYOUT_COMPONENT_BODY_LABEL_FILL,
+        angle=0,
+        anchor="center",
+    )
 
+
+def _draw_layout_terminal_hole_label_png(image, pin, label_margin, scale):
+    center = dsl._offset_point(dsl._stripboard_hole_position(pin.hole), label_margin, 0)
+    dsl._draw_png_text_rotated(
+        image,
+        (center[0], center[1] + 0.005),
+        _terminal_label(pin.terminal_name),
+        font=dsl._overlay_png_font(scale, 0.145),
+        scale=scale,
+        fill=LAYOUT_COMPONENT_BODY_LABEL_FILL,
+        angle=0,
+        anchor="center",
+    )
+
+
+def _layout_label_margin(labels):
+    longest_label = max((len(label.text) for label in labels), default=0)
+    return max(
+        dsl.STRIPBOARD_OVERLAY_NET_LABEL_MARGIN,
+        0.8 + longest_label * 0.17,
+    )
+
+
+def _placed_layout_labels(layout, circuit, pins, detail):
+    labels = list(_layout_row_labels(layout, pins))
+    if detail != "annotated":
+        return tuple(labels)
     for overlay in _layout_component_overlays(layout, circuit, pins):
         center = overlay["center"]
         labels.append(
@@ -2457,6 +3147,32 @@ def _placed_layout_labels(layout, circuit, pins):
         )
 
     return dsl._resolve_stripboard_overlay_label_collisions(tuple(labels))
+
+
+def _layout_row_labels(layout, pins):
+    row_nets = {}
+    for pin in pins:
+        row_nets.setdefault(pin.row, set()).add(pin.net_name)
+    labels = []
+    for row in range(layout.board.height_pitches):
+        net_names = tuple(sorted(row_nets.get(row, ())))
+        if not net_names:
+            continue
+        text = " / ".join(net_names)
+        labels.append(
+            dsl._StripboardOverlayLabel(
+                class_name="layout-row-label",
+                text=text,
+                x=-0.22,
+                y=dsl._stripboard_row_center(row) + 0.115,
+                font_size=dsl.STRIPBOARD_OVERLAY_NODE_LABEL_SIZE,
+                font_weight="800",
+                text_anchor="end",
+                data_attrs=(("data-row", row), ("data-net", text)),
+                collision_priority=0,
+            )
+        )
+    return tuple(labels)
 
 
 def _layout_component_overlays(layout, circuit, pins):
@@ -2483,13 +3199,16 @@ def _layout_component_overlays(layout, circuit, pins):
             )
         )
         center = _component_overlay_center(terminal_holes)
+        body_center = _component_body_center(terminal_holes, component.kind)
         overlays.append(
             {
                 "refdes": component.refdes,
+                "kind": component.kind,
                 "footprint_name": placed_component.footprint_name,
                 "label": _component_label(component),
                 "segments": segments,
                 "center": center,
+                "body_center": body_center,
             }
         )
     return tuple(overlays)
@@ -2505,6 +3224,19 @@ def _component_overlay_center(terminal_holes):
     return dsl._stripboard_hole_position(
         dsl._stripboard_terminal_center_hole(terminal_holes)
     )
+
+
+def _component_body_center(terminal_holes, component_kind):
+    center = _component_overlay_center(terminal_holes)
+    if component_kind not in {"bjt_npn", "pmos"}:
+        return center
+    rows = {row for row, _col in terminal_holes}
+    cols = {col for _row, col in terminal_holes}
+    if len(cols) == 1:
+        return center[0] + 0.38, center[1]
+    if len(rows) == 1:
+        return center[0], center[1] - 0.38
+    return center[0] + 0.28, center[1] - 0.28
 
 
 def _component_label(component):

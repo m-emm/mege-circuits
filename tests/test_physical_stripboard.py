@@ -6,6 +6,10 @@ from examples.high_side_switch_v3 import create_high_side_switch
 from examples.integration.tb6600_stripboard_interface import (
     create_schema_for_tb6600_interface,
 )
+from examples.integration.tb6600_stripboard_layout import (
+    create_tb6600_verified_stripboard_plan,
+    render_tb6600_stripboard_build,
+)
 from examples.voltage_divider import create_voltage_divider
 from mege_circuits.simple import (
     Footprint,
@@ -142,10 +146,20 @@ def test_render_stripboard_layout_writes_svg_and_png(tmp_path):
     assert "<svg" in svg
     assert 'class="layout-pin"' in svg
     assert 'class="layout-jumper"' in svg
-    assert 'class="layout-blocker"' in svg
+    assert 'class="layout-blocker"' not in svg
+    assert svg.count('class="layout-terminal-hole-label"') == len(
+        placed_component_pins(layout, circuit)
+    )
+    assert 'class="layout-pin-label"' not in svg
     assert 'data-element="R1"' in svg
     assert 'data-terminal="start"' in svg
     assert png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+    annotated_path = tmp_path / "manual_layout_annotated.svg"
+    render_stripboard_layout(layout, circuit, file=annotated_path, detail="annotated")
+    annotated_svg = annotated_path.read_text(encoding="utf-8")
+    assert 'class="layout-blocker"' in annotated_svg
+    assert 'class="layout-terminal-hole-label"' in annotated_svg
 
 
 def test_extract_physical_netlist_and_verification_pass_for_connected_layout():
@@ -205,9 +219,9 @@ def test_plan_stripboard_routes_voltage_divider_with_verified_layout():
 
     assert layout is not None
     assert report.ok, report.summary()
-    assert score_stripboard_layout(layout, circuit, report) == (0, 4, 2, 5, 4)
+    assert score_stripboard_layout(layout, circuit, report) == (0, 0, 0, 3, 4)
     assert [component.refdes for component in layout.placed_components] == ["R1", "R2"]
-    assert {(cut.row, cut.col) for cut in layout.cuts} == {(3, 1), (4, 1)}
+    assert layout.cuts == ()
 
 
 def test_plan_stripboard_uses_projection_hints_from_schema():
@@ -222,9 +236,17 @@ def test_plan_stripboard_uses_projection_hints_from_schema():
     )
 
     assert isinstance(hints, StripboardRoutingHints)
+    assert hints.board_width_pitches == 5
+    assert hints.board_height_pitches == 3
+    assert hints.component_terminal_holes[("R1", "start")] == (0, 2)
+    assert hints.component_terminal_holes[("R2", "end")] == (2, 3)
     assert report.ok, report.summary()
-    assert layout.placed_components[0].refdes == "R1"
-    assert layout.placed_components[0].origin[1] == 2
+    pins = {
+        (pin.refdes, pin.terminal_name): pin.hole
+        for pin in placed_component_pins(layout, circuit)
+    }
+    assert pins[("R1", "start")] == hints.component_terminal_holes[("R1", "start")]
+    assert pins[("R2", "end")] == hints.component_terminal_holes[("R2", "end")]
 
 
 def test_plan_stripboard_routes_high_side_switch_with_jumpers_and_cuts():
@@ -238,7 +260,7 @@ def test_plan_stripboard_routes_high_side_switch_with_jumpers_and_cuts():
     assert layout is not None
     assert report.ok, report.summary()
     assert len(layout.placed_components) == len(circuit.components)
-    assert len(layout.jumpers) == sum(
+    assert len(layout.jumpers) < sum(
         len(component.terminals) for component in circuit.components
     )
     assert {
@@ -253,21 +275,29 @@ def test_plan_stripboard_reports_failure_for_too_small_board():
 
     layout, report = plan_stripboard(
         circuit,
-        board=create_stripboard(5, 4),
+        board=create_stripboard(1, 1),
     )
 
     assert layout is None
     assert not report.ok
     assert report.errors[0].code == "routing_failed"
-    assert "needs component row" in report.summary()
+    assert "No legal placement candidates" in report.summary()
 
 
 def test_write_stripboard_build_outputs_writes_build_artifacts(tmp_path):
     circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
-    layout, report = plan_stripboard(
+    layout = create_manual_stripboard_layout(
         circuit,
-        board=create_stripboard(5, 5),
+        board=create_stripboard(5, 8),
+        placements={
+            "R1": ((0, 0), 0),
+            "R2": ((4, 2), 90),
+        },
+        cuts=((0, 1),),
+        jumpers=(((0, 3), (4, 2), "midpoint"),),
     )
+    report = verify_stripboard_layout(layout, circuit)
+    assert report.ok, report.summary()
 
     outputs = write_stripboard_build_outputs(
         layout,
@@ -289,11 +319,44 @@ def test_write_stripboard_build_outputs_writes_build_artifacts(tmp_path):
     data = json.loads(outputs.data_json.read_text(encoding="utf-8"))
     assert data["verification"]["ok"] is True
     assert data["layout"]["board"] == {
-        "height_pitches": 5,
+        "height_pitches": 8,
         "pitch_mm": 2.54,
         "strip_direction": "horizontal",
         "width_pitches": 5,
     }
+
+
+def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(tmp_path):
+    _schema, circuit, layout, report = create_tb6600_verified_stripboard_plan()
+
+    assert report.ok, report.summary()
+    assert layout.board.height_pitches <= 12
+    assert len(layout.cuts) <= 8
+    assert len(layout.jumpers) <= 18
+
+    svg_path = tmp_path / "tb6600.svg"
+    render_stripboard_layout(layout, circuit, file=svg_path)
+    svg = svg_path.read_text(encoding="utf-8")
+    pins = placed_component_pins(layout, circuit)
+
+    assert svg.count('class="layout-terminal-hole-label"') == len(pins)
+    assert 'class="layout-pin-label"' not in svg
+    assert 'class="layout-component-body"' in svg
+    assert 'data-element="Q1"' in svg
+    assert 'data-terminal="emitter"' in svg
+
+
+def test_tb6600_build_outputs_include_only_verified_artifacts(tmp_path):
+    outputs = render_tb6600_stripboard_build(tmp_path)
+
+    assert all(path.exists() for path in outputs.as_tuple())
+    assert (
+        outputs.top_svg.read_text(encoding="utf-8").count(
+            'class="layout-terminal-hole-label"'
+        )
+        == 27
+    )
+    assert not tuple(tmp_path.glob("*projection*"))
 
 
 def test_verify_stripboard_layout_reports_open_circuit():

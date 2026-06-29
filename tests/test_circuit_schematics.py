@@ -9,7 +9,7 @@ from examples.integration.tb6600_stripboard_interface import (
 )
 from examples.integration.tb6600_stripboard_layout import (
     STRIPBOARD_ARTIFACT_STEM,
-    render_tb6600_stripboard_projection,
+    render_tb6600_stripboard_build,
 )
 from examples.voltage_divider import create_voltage_divider
 from mege_circuits.simple import (
@@ -262,7 +262,9 @@ def test_render_schemdraw_writes_png(tmp_path):
 
 def test_tb6600_integration_examples_render_stable_artifacts():
     schematic_svg, schematic_png = render_tb6600_schematic()
-    stripboard_svg, stripboard_png = render_tb6600_stripboard_projection()
+    stripboard_outputs = render_tb6600_stripboard_build()
+    stripboard_svg = stripboard_outputs.top_svg
+    stripboard_png = stripboard_outputs.top_png
 
     assert "<svg" in schematic_svg.read_text(encoding="utf-8")
     assert schematic_png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
@@ -290,6 +292,7 @@ def test_tb6600_integration_examples_render_stable_artifacts():
         stripboard_png.parent / f"{STRIPBOARD_ARTIFACT_STEM}.png",
         stripboard_png,
     )
+    assert not tuple(stripboard_svg.parent.glob("*projection*"))
 
 
 def _assert_latest_artifact_link(latest, artifact):
