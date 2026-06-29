@@ -1,6 +1,7 @@
 import pytest
 
 import mege_circuits.dsl as circuit_dsl
+from examples.high_side_switch_v3 import create_high_side_switch
 from examples.integration.tb6600_stripboard_interface import (
     SCHEMATIC_ARTIFACT_STEM,
     create_schema_for_tb6600_interface,
@@ -14,17 +15,24 @@ from examples.voltage_divider import create_voltage_divider
 from mege_circuits.simple import (
     Alignment,
     BjtNpn,
+    Circuit,
+    Component,
     Direction,
     Dot,
+    ERCIssue,
+    ERCReport,
     Ground,
     Resistor,
     Stripboard,
     StripboardBlocker,
     StripboardCut,
+    Terminal,
     Wire,
     Zener,
     align,
     assign_schema_nets_to_stripboard,
+    check_schema_erc,
+    circuit_from_schema,
     compact_sparse_stripboard_rows,
     compact_stripboard_connections_left,
     create_element,
@@ -34,6 +42,7 @@ from mege_circuits.simple import (
     create_schema,
     create_stripboard,
     create_wire,
+    export_netlist,
     get_schema_net_visualizations,
     permute_stripboard_rows_for_element_span,
     point_at,
@@ -56,6 +65,168 @@ def test_voltage_divider_schema_has_expected_shape():
     assert schema.elements[0].terminal_views["end"] == "midpoint"
     assert schema.elements[0].terminal_nets["start"] == "vcc"
     assert schema.elements[0].terminal_nets["end"] == "midpoint"
+
+
+def test_circuit_from_schema_exports_voltage_divider_netlist():
+    schema = create_voltage_divider()
+
+    circuit = circuit_from_schema(schema, name="voltage_divider")
+    netlist = export_netlist(circuit)
+    report = check_schema_erc(schema)
+
+    assert isinstance(circuit, Circuit)
+    assert all(isinstance(component, Component) for component in circuit.components)
+    assert all(
+        isinstance(terminal, Terminal)
+        for component in circuit.components
+        for terminal in component.terminals
+    )
+    assert isinstance(report, ERCReport)
+    assert report.ok
+    assert {issue.code for issue in report.warnings} == {"single_terminal_net"}
+    assert netlist == {
+        "name": "voltage_divider",
+        "nets": ("gnd", "midpoint", "vcc"),
+        "components": {
+            "R1": {
+                "kind": "resistor",
+                "value": "10K",
+                "terminals": {"end": "midpoint", "start": "vcc"},
+            },
+            "R2": {
+                "kind": "resistor",
+                "value": "20K",
+                "terminals": {"end": "gnd", "start": "midpoint"},
+            },
+        },
+    }
+
+
+def test_semantic_netlist_ignores_drawing_positions():
+    schema = create_voltage_divider()
+    moved_schema = create_schema(
+        [translate(20, 10)(node) for node in schema.node_views],
+        [translate(-8, 7)(element) for element in schema.elements],
+        schema.wires,
+    )
+
+    assert export_netlist(circuit_from_schema(schema)) == export_netlist(
+        circuit_from_schema(moved_schema)
+    )
+
+
+def test_circuit_from_high_side_switch_schema_exports_semantic_components():
+    circuit = circuit_from_schema(create_high_side_switch(), name="high_side_switch")
+    netlist = export_netlist(circuit)
+
+    assert netlist["name"] == "high_side_switch"
+    assert set(netlist["components"]) == {
+        "D1",
+        "F1",
+        "Q1",
+        "Q2",
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+    }
+    assert netlist["components"]["Q1"] == {
+        "kind": "pmos",
+        "value": "IRF5210",
+        "terminals": {
+            "drain": "vmot",
+            "gate": "gate",
+            "source": "after_fuse",
+        },
+    }
+    assert netlist["components"]["Q2"]["terminals"] == {
+        "base": "base_drive",
+        "collector": "q2_collector",
+        "emitter": "gnd",
+    }
+
+
+def test_circuit_from_tb6600_schema_exports_expected_semantic_shape():
+    circuit = circuit_from_schema(
+        create_schema_for_tb6600_interface(),
+        name="tb6600_interface",
+    )
+    netlist = export_netlist(circuit)
+
+    assert netlist["name"] == "tb6600_interface"
+    assert len(netlist["nets"]) == 12
+    assert set(netlist["components"]) == {
+        "C1",
+        "Q1",
+        "Q2",
+        "Q3",
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+        "R5",
+        "R6",
+        "R7",
+        "R8",
+    }
+    assert netlist["components"]["Q1"]["terminals"] == {
+        "base": "step_base",
+        "collector": "step_pul_minus",
+        "emitter": "gnd",
+    }
+    assert netlist["components"]["R5"]["terminals"] == {
+        "end": "ena_plus",
+        "start": "v24",
+    }
+
+
+def test_circuit_from_schema_raises_on_duplicate_refdes():
+    a = create_node(Dot, "a")
+    b = create_node(Dot, "b")
+    r1 = create_element(Resistor, "Rdup", "1k", a, b)
+    r2 = create_element(Resistor, "Rdup", "2k", b, a)
+    schema = create_schema([a, b], [r1, r2])
+
+    report = check_schema_erc(schema)
+
+    assert [issue.code for issue in report.errors] == ["duplicate_refdes"]
+    with pytest.raises(ValueError, match="duplicate_refdes"):
+        circuit_from_schema(schema)
+
+
+def test_check_schema_erc_reports_malformed_schema_errors():
+    a_net = create_net("a")
+    b_net = create_net("b")
+    a = create_node(Dot, "same", net=a_net)
+    duplicate_a = create_node(Dot, "same", net=a_net)
+    b = create_node(Dot, "b", net=b_net)
+    resistor = create_element(Resistor, "Rbad", "1k", a, b)
+    resistor.terminal_views = {"start": "same", "extra": "b"}
+    resistor.terminal_nets = {"start": "a", "extra": "missing", "ghost": "missing"}
+    wire = circuit_dsl.WireSegment(
+        start_view="same",
+        end_view="b",
+        net_name="a",
+        name="bad_wire",
+    )
+    schema = circuit_dsl.Schema(
+        nets=[a_net, b_net],
+        node_views=[a, duplicate_a, b],
+        elements=[resistor],
+        wires=[wire],
+    )
+
+    report = check_schema_erc(schema)
+
+    assert isinstance(report.errors[0], ERCIssue)
+    assert {
+        "duplicate_node_view",
+        "missing_terminal",
+        "unknown_terminal",
+        "terminal_metadata_mismatch",
+        "unknown_net",
+        "wire_net_mismatch",
+    }.issubset({issue.code for issue in report.errors})
 
 
 def test_align_returns_placed_copy_without_mutating_original():

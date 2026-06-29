@@ -362,6 +362,9 @@ circuit = circuit_from_schema(schema)
 netlist = export_netlist(circuit)
 ```
 
+Implementation status: this phase is now represented by
+`mege_circuits.circuit`, exposed through `mege_circuits.simple`.
+
 This should be easy because `Element` already stores `terminal_nets`. The first
 implementation should avoid clever inference and simply normalize what the DSL
 already knows.

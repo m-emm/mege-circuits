@@ -52,6 +52,28 @@ Use a `.png` filename instead of `.svg` to render a PNG preview:
 render_schemdraw(schema, file=Path("voltage_divider.png"))
 ```
 
+## Semantic Netlist Export
+
+A `Schema` can be lowered into a semantic `Circuit` and exported as a
+deterministic structured netlist. This semantic model ignores drawing
+coordinates and is the intended source for future stripboard planning work:
+
+```python
+schema = create_voltage_divider()
+
+report = check_schema_erc(schema)
+if not report.ok:
+    raise ValueError(report.summary())
+
+circuit = circuit_from_schema(schema, name="voltage_divider")
+netlist = export_netlist(circuit)
+```
+
+The ERC report catches semantic errors such as duplicate component reference
+designators, missing terminals, unknown nets, malformed wires, and unsupported
+component types. Single-terminal nets are reported as warnings rather than
+errors.
+
 ## Stripboard Renderer
 
 The package also includes a small stripboard renderer for bare board
