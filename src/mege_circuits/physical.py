@@ -204,6 +204,36 @@ class PhysicalVerificationReport:
 
 
 @dataclass(frozen=True)
+class StripboardDensityMetrics:
+    total_holes: int
+    occupied_holes: int
+    empty_holes: int
+    empty_ratio: float
+    used_width: int
+    used_height: int
+    component_pin_holes: int
+    connector_holes: int
+    cut_holes: int
+    blocker_holes: int
+    jumper_endpoint_holes: int
+
+    def as_dict(self):
+        return {
+            "total_holes": self.total_holes,
+            "occupied_holes": self.occupied_holes,
+            "empty_holes": self.empty_holes,
+            "empty_ratio": self.empty_ratio,
+            "used_width": self.used_width,
+            "used_height": self.used_height,
+            "component_pin_holes": self.component_pin_holes,
+            "connector_holes": self.connector_holes,
+            "cut_holes": self.cut_holes,
+            "blocker_holes": self.blocker_holes,
+            "jumper_endpoint_holes": self.jumper_endpoint_holes,
+        }
+
+
+@dataclass(frozen=True)
 class StripboardRoutingHints:
     """Placement hints for the conservative stripboard router."""
 
@@ -877,10 +907,12 @@ def plan_stripboard(
 
             if report.ok:
                 verified_candidates += 1
-                layout, report = _left_compact_stripboard_layout(
+                layout, report = _optimize_routed_stripboard_layout(
                     layout,
                     circuit,
                     locked_refdeses=fixed_placement_map,
+                    fixed_cuts=normalized_fixed_cuts,
+                    fixed_jumpers=normalized_fixed_jumpers,
                 )
 
             score = _routing_layout_score(layout, report, placement_score, circuit)
@@ -974,12 +1006,173 @@ def _circuit_log_name(circuit):
 
 
 def _layout_log_summary(layout):
+    metrics = _stripboard_density_metrics(layout)
     return (
         f"board={layout.board.width_pitches}x{layout.board.height_pitches} "
         f"components={len(layout.placed_components)} "
         f"connectors={len(layout.connectors)} cuts={len(layout.cuts)} "
-        f"jumpers={len(layout.jumpers)}"
+        f"jumpers={len(layout.jumpers)} empty_holes={metrics.empty_holes}"
     )
+
+
+def _stripboard_density_metrics(layout, circuit=None):
+    total_holes = layout.board.width_pitches * layout.board.height_pitches
+    if circuit is None:
+        component_pins = {pin.hole for pin in _layout_score_pins(layout)}
+    else:
+        component_pins = {pin.hole for pin in placed_component_pins(layout, circuit)}
+    connector_holes = {connector.hole for connector in layout.connectors}
+    cut_holes = {(cut.row, cut.col) for cut in layout.cuts}
+    blocker_holes = {(blocker.row, blocker.col) for blocker in layout.blockers}
+    jumper_endpoint_holes = {
+        hole for jumper in layout.jumpers for hole in (jumper.start, jumper.end)
+    }
+    occupied_holes = (
+        component_pins
+        | connector_holes
+        | cut_holes
+        | blocker_holes
+        | jumper_endpoint_holes
+    )
+    empty_holes = max(0, total_holes - len(occupied_holes))
+    return StripboardDensityMetrics(
+        total_holes=total_holes,
+        occupied_holes=len(occupied_holes),
+        empty_holes=empty_holes,
+        empty_ratio=0.0 if total_holes == 0 else empty_holes / total_holes,
+        used_width=_layout_used_width(layout),
+        used_height=_layout_used_height(layout),
+        component_pin_holes=len(component_pins),
+        connector_holes=len(connector_holes),
+        cut_holes=len(cut_holes),
+        blocker_holes=len(blocker_holes),
+        jumper_endpoint_holes=len(jumper_endpoint_holes),
+    )
+
+
+def _layout_optimization_score(layout, circuit, report):
+    metrics = _stripboard_density_metrics(layout, circuit)
+    return (
+        int(not report.ok),
+        len(report.errors),
+        len(layout.jumpers),
+        len(layout.cuts),
+        metrics.total_holes,
+        metrics.empty_holes,
+        metrics.used_height,
+        metrics.used_width,
+        _layout_row_sum(layout),
+        _layout_col_sum(layout),
+        _layout_jumper_length(layout),
+    )
+
+
+def _optimize_routed_stripboard_layout(
+    layout,
+    circuit,
+    *,
+    trim_margin=1,
+    locked_refdeses=(),
+    fixed_cuts=(),
+    fixed_jumpers=(),
+):
+    report = verify_stripboard_layout(layout, circuit)
+    if not report.ok:
+        return layout, report
+
+    locked_refdeses = frozenset(str(refdes) for refdes in locked_refdeses)
+    fixed_cut_holes = frozenset((cut.row, cut.col) for cut in fixed_cuts)
+    fixed_jumper_keys = frozenset(
+        _jumper_identity_key(jumper) for jumper in fixed_jumpers
+    )
+
+    best_layout = layout
+    best_report = report
+    best_score = _layout_optimization_score(best_layout, circuit, best_report)
+    working = layout
+    working_report = report
+    max_iterations = max(1, _optimization_cycle_limit())
+
+    _logger.debug(
+        "Starting routed layout optimization %s score=%s fixed_cuts=%s "
+        "fixed_jumpers=%s",
+        _layout_log_summary(layout),
+        best_score,
+        tuple(sorted(fixed_cut_holes)),
+        len(fixed_jumper_keys),
+    )
+    for iteration in range(max_iterations):
+        cycle = working
+        cycle_report = working_report
+        changed = False
+
+        cycle, cycle_report, absorbed = _absorb_connector_only_jumpers(
+            cycle,
+            circuit,
+            fixed_jumper_keys=fixed_jumper_keys,
+        )
+        changed = changed or absorbed
+
+        cycle, cycle_report, relaxed = _right_relax_flexible_terminals(
+            cycle,
+            circuit,
+            fixed_jumper_keys=fixed_jumper_keys,
+        )
+        changed = changed or relaxed
+
+        cycle, cycle_report = _left_compact_stripboard_layout(
+            cycle,
+            circuit,
+            trim_margin=trim_margin,
+            locked_refdeses=locked_refdeses,
+            fixed_cuts=fixed_cut_holes,
+            fixed_jumpers=fixed_jumper_keys,
+        )
+
+        cycle, cycle_report, moved_down = _down_compact_stripboard_layout(
+            cycle,
+            circuit,
+            locked_refdeses=locked_refdeses,
+            fixed_cuts=fixed_cut_holes,
+            fixed_jumpers=fixed_jumper_keys,
+        )
+        changed = changed or moved_down
+
+        cycle, cycle_report = _left_compact_stripboard_layout(
+            cycle,
+            circuit,
+            trim_margin=trim_margin,
+            locked_refdeses=locked_refdeses,
+            fixed_cuts=fixed_cut_holes,
+            fixed_jumpers=fixed_jumper_keys,
+        )
+
+        cycle_score = _layout_optimization_score(cycle, circuit, cycle_report)
+        if cycle_score < best_score:
+            _logger.debug(
+                "Accepted routed layout optimization iteration=%s score=%s->%s %s",
+                iteration + 1,
+                best_score,
+                cycle_score,
+                _layout_log_summary(cycle),
+            )
+            best_layout = cycle
+            best_report = cycle_report
+            best_score = cycle_score
+            working = cycle
+            working_report = cycle_report
+            continue
+        if not changed:
+            break
+        break
+
+    _logger.debug(
+        "Finished routed layout optimization %s score=%s metrics=%s",
+        _layout_log_summary(best_layout),
+        best_score,
+        _stripboard_density_metrics(best_layout, circuit).as_dict(),
+    )
+    return best_layout, best_report
 
 
 def _left_compact_stripboard_layout(
@@ -988,6 +1181,8 @@ def _left_compact_stripboard_layout(
     *,
     trim_margin=1,
     locked_refdeses=(),
+    fixed_cuts=(),
+    fixed_jumpers=(),
 ):
     report = verify_stripboard_layout(layout, circuit)
     if not report.ok:
@@ -998,6 +1193,8 @@ def _left_compact_stripboard_layout(
         return layout, report
 
     locked_refdeses = frozenset(str(refdes) for refdes in locked_refdeses)
+    fixed_cuts = frozenset(fixed_cuts)
+    fixed_jumpers = frozenset(fixed_jumpers)
     compacted = layout
     compacted_report = report
     compacted_score = _left_compaction_score(compacted)
@@ -1019,7 +1216,12 @@ def _left_compact_stripboard_layout(
     iteration = 0
     for iteration in range(max_iterations):
         accepted = None
-        for unit in _left_compaction_units(compacted, locked_refdeses):
+        for unit in _left_compaction_units(
+            compacted,
+            locked_refdeses,
+            fixed_cuts=fixed_cuts,
+            fixed_jumpers=fixed_jumpers,
+        ):
             accepted = _left_compaction_best_move(
                 compacted,
                 circuit,
@@ -1065,7 +1267,13 @@ def _left_compaction_unit_count(layout):
     )
 
 
-def _left_compaction_units(layout, locked_refdeses=frozenset()):
+def _left_compaction_units(
+    layout,
+    locked_refdeses=frozenset(),
+    *,
+    fixed_cuts=frozenset(),
+    fixed_jumpers=frozenset(),
+):
     footprint_map = _footprints_by_name(layout.footprints)
     units = []
     components = []
@@ -1097,11 +1305,15 @@ def _left_compaction_units(layout, locked_refdeses=frozenset()):
 
     cuts = []
     for cut in layout.cuts:
+        if (cut.row, cut.col) in fixed_cuts:
+            continue
         cuts.append((cut.col, cut.row, ("cut", cut.row, cut.col)))
     units.extend(item[-1] for item in sorted(cuts))
 
     jumper_endpoints = []
     for index, jumper in enumerate(layout.jumpers):
+        if _jumper_identity_key(jumper) in fixed_jumpers:
+            continue
         for endpoint_name, hole in (("start", jumper.start), ("end", jumper.end)):
             jumper_endpoints.append(
                 (
@@ -1437,6 +1649,580 @@ def _left_compaction_score(layout):
     )
 
 
+def _absorb_connector_only_jumpers(layout, circuit, *, fixed_jumper_keys=frozenset()):
+    current = layout
+    current_report = verify_stripboard_layout(current, circuit)
+    changed = False
+    for jumper in tuple(current.jumpers):
+        if _jumper_identity_key(jumper) in fixed_jumper_keys:
+            continue
+        index = _layout_jumper_index(current, jumper)
+        if index is None:
+            continue
+        accepted = _absorb_connector_only_jumper(
+            current,
+            circuit,
+            index,
+        )
+        if accepted is None:
+            continue
+        current, current_report = accepted
+        changed = True
+    return current, current_report, changed
+
+
+def _absorb_connector_only_jumper(layout, circuit, jumper_index):
+    jumper = layout.jumpers[jumper_index]
+    jumpers_without = tuple(
+        candidate
+        for index, candidate in enumerate(layout.jumpers)
+        if index != jumper_index
+    )
+    jumperless, jumperless_report = _rebuild_planned_stripboard_layout(
+        layout,
+        circuit,
+        board=layout.board,
+        placed_components=layout.placed_components,
+        cuts=layout.cuts,
+        jumpers=jumpers_without,
+        connectors=layout.connectors,
+    )
+    if jumperless is None or jumperless_report.physical_netlist is None:
+        return None
+
+    start_conductor = _conductor_for_hole(
+        jumperless_report.physical_netlist, jumper.start
+    )
+    end_conductor = _conductor_for_hole(jumperless_report.physical_netlist, jumper.end)
+    if start_conductor is None or end_conductor is None:
+        return None
+
+    attempts = (
+        (start_conductor, end_conductor, jumper.end),
+        (end_conductor, start_conductor, jumper.start),
+    )
+    for connector_conductor, target_conductor, preferred_hole in attempts:
+        connector_pin = _single_connector_pin_for_net(
+            connector_conductor,
+            layout,
+            jumper.net_name,
+        )
+        if connector_pin is None:
+            continue
+        connector = _layout_connector_by_name(layout, connector_pin.refdes)
+        if connector is None:
+            continue
+        target_holes = _connector_absorption_target_holes(
+            target_conductor,
+            preferred_hole,
+        )
+        occupied_holes = _left_compaction_occupied_holes(
+            layout,
+            circuit,
+            ignored_connector_name=connector.name,
+            ignored_jumper_indexes=frozenset((jumper_index,)),
+        )
+        for hole in target_holes:
+            if hole in occupied_holes:
+                continue
+            candidate_connectors = tuple(
+                (
+                    PlacedConnector(
+                        name=candidate.name,
+                        net_name=candidate.net_name,
+                        hole=hole,
+                        label=candidate.label,
+                        kind=candidate.kind,
+                    )
+                    if candidate.name == connector.name
+                    else candidate
+                )
+                for candidate in layout.connectors
+            )
+            candidate, candidate_report = _rebuild_planned_stripboard_layout(
+                layout,
+                circuit,
+                board=layout.board,
+                placed_components=layout.placed_components,
+                cuts=layout.cuts,
+                jumpers=jumpers_without,
+                connectors=candidate_connectors,
+            )
+            if candidate is None or not candidate_report.ok:
+                continue
+            _logger.debug(
+                "Absorbed connector-only jumper net=%s connector=%s hole=%s->%s",
+                jumper.net_name,
+                connector.name,
+                connector.hole,
+                hole,
+            )
+            return candidate, candidate_report
+    return None
+
+
+def _single_connector_pin_for_net(conductor, layout, net_name):
+    connector_names = {connector.name for connector in layout.connectors}
+    pins_for_net = tuple(pin for pin in conductor.pins if pin.net_name == net_name)
+    if len(pins_for_net) != 1:
+        return None
+    pin = pins_for_net[0]
+    if pin.refdes not in connector_names or pin.terminal_name != "pin":
+        return None
+    return pin
+
+
+def _connector_absorption_target_holes(conductor, preferred_hole):
+    holes = tuple(conductor.holes)
+    preferred = (preferred_hole,) if preferred_hole in set(holes) else ()
+    rest = tuple(
+        hole
+        for hole in sorted(
+            holes,
+            key=lambda hole: (
+                _hole_distance(hole, preferred_hole),
+                hole[1],
+                hole[0],
+            ),
+        )
+        if hole not in preferred
+    )
+    return (*preferred, *rest)
+
+
+def _right_relax_flexible_terminals(
+    layout,
+    circuit,
+    *,
+    fixed_jumper_keys=frozenset(),
+):
+    current = layout
+    current_report = verify_stripboard_layout(current, circuit)
+    changed = False
+
+    for connector in sorted(
+        current.connectors,
+        key=lambda connector: (connector.row, -connector.col, connector.name),
+    ):
+        moved = _right_relax_connector(current, circuit, connector.name)
+        if moved is None:
+            continue
+        current, current_report = moved
+        changed = True
+
+    endpoint_keys = []
+    for index, jumper in enumerate(current.jumpers):
+        if _jumper_identity_key(jumper) in fixed_jumper_keys:
+            continue
+        for endpoint_name, hole in (("start", jumper.start), ("end", jumper.end)):
+            endpoint_keys.append((hole[0], -hole[1], index, endpoint_name))
+    for _row, _negative_col, index, endpoint_name in sorted(endpoint_keys):
+        moved = _right_relax_jumper_endpoint(current, circuit, index, endpoint_name)
+        if moved is None:
+            continue
+        current, current_report = moved
+        changed = True
+
+    return current, current_report, changed
+
+
+def _right_relax_connector(layout, circuit, name):
+    connector = _layout_connector_by_name(layout, name)
+    if connector is None:
+        return None
+    _left, right = _cut_bounded_segment_bounds(layout, connector.row, connector.col)
+    if connector.col >= right:
+        return None
+
+    occupied_holes = _left_compaction_occupied_holes(
+        layout,
+        circuit,
+        ignored_connector_name=connector.name,
+    )
+    for col in range(right, connector.col, -1):
+        hole = (connector.row, col)
+        if hole in occupied_holes:
+            continue
+        candidate_connectors = tuple(
+            (
+                PlacedConnector(
+                    name=candidate.name,
+                    net_name=candidate.net_name,
+                    hole=hole,
+                    label=candidate.label,
+                    kind=candidate.kind,
+                )
+                if candidate.name == name
+                else candidate
+            )
+            for candidate in layout.connectors
+        )
+        accepted = _verified_layout_variant(
+            layout,
+            circuit,
+            connectors=candidate_connectors,
+        )
+        if accepted is not None:
+            _logger.debug(
+                "Right-relaxed connector name=%s hole=%s->%s",
+                name,
+                connector.hole,
+                hole,
+            )
+            return accepted
+    return None
+
+
+def _right_relax_jumper_endpoint(layout, circuit, jumper_index, endpoint_name):
+    if jumper_index >= len(layout.jumpers):
+        return None
+    jumper = layout.jumpers[jumper_index]
+    hole = jumper.start if endpoint_name == "start" else jumper.end
+    row, col = hole
+    _left, right = _cut_bounded_segment_bounds(layout, row, col)
+    if col >= right:
+        return None
+
+    occupied_holes = _left_compaction_occupied_holes(
+        layout,
+        circuit,
+        ignored_jumper_endpoint=(jumper_index, endpoint_name),
+    )
+    for candidate_col in range(right, col, -1):
+        candidate_hole = (row, candidate_col)
+        if candidate_hole in occupied_holes:
+            continue
+        moved = _replace_jumper_endpoint(jumper, endpoint_name, candidate_hole)
+        candidate_jumpers = tuple(
+            moved if index == jumper_index else candidate
+            for index, candidate in enumerate(layout.jumpers)
+        )
+        accepted = _verified_layout_variant(
+            layout,
+            circuit,
+            jumpers=candidate_jumpers,
+        )
+        if accepted is not None:
+            _logger.debug(
+                "Right-relaxed jumper endpoint net=%s index=%s endpoint=%s "
+                "hole=%s->%s",
+                jumper.net_name,
+                jumper_index,
+                endpoint_name,
+                hole,
+                candidate_hole,
+            )
+            return accepted
+    return None
+
+
+def _down_compact_stripboard_layout(
+    layout,
+    circuit,
+    *,
+    locked_refdeses=frozenset(),
+    fixed_cuts=frozenset(),
+    fixed_jumpers=frozenset(),
+):
+    report = verify_stripboard_layout(layout, circuit)
+    if not report.ok:
+        return layout, report, False
+
+    locked_refdeses = frozenset(str(refdes) for refdes in locked_refdeses)
+    fixed_cuts = frozenset(fixed_cuts)
+    fixed_jumpers = frozenset(fixed_jumpers)
+    compacted = layout
+    compacted_report = report
+    accepted_count = 0
+    max_iterations = max(
+        1,
+        _left_compaction_unit_count(compacted) * compacted.board.height_pitches + 1,
+    )
+    for _iteration in range(max_iterations):
+        accepted = None
+        for unit in _down_compaction_units(
+            compacted,
+            locked_refdeses,
+            fixed_cuts=fixed_cuts,
+            fixed_jumpers=fixed_jumpers,
+        ):
+            accepted = _down_compaction_best_move(compacted, circuit, unit)
+            if accepted is not None:
+                break
+        if accepted is None:
+            break
+        compacted, compacted_report = accepted
+        accepted_count += 1
+
+    if accepted_count:
+        _logger.debug(
+            "Finished down compaction accepted_moves=%s %s",
+            accepted_count,
+            _layout_log_summary(compacted),
+        )
+    return compacted, compacted_report, bool(accepted_count)
+
+
+def _down_compaction_units(
+    layout,
+    locked_refdeses=frozenset(),
+    *,
+    fixed_cuts=frozenset(),
+    fixed_jumpers=frozenset(),
+):
+    footprint_map = _footprints_by_name(layout.footprints)
+    units = []
+    for placed_component in layout.placed_components:
+        if placed_component.refdes in locked_refdeses:
+            continue
+        holes = _placed_component_occupied_holes(placed_component, footprint_map)
+        units.append(
+            (
+                -max((row for row, _col in holes), default=0),
+                _holes_min_col(holes),
+                "component",
+                placed_component.refdes,
+                ("component", placed_component.refdes),
+            )
+        )
+    for connector in layout.connectors:
+        units.append(
+            (
+                -connector.row,
+                connector.col,
+                "connector",
+                connector.name,
+                ("connector", connector.name),
+            )
+        )
+    for cut in layout.cuts:
+        if (cut.row, cut.col) in fixed_cuts:
+            continue
+        units.append(
+            (-cut.row, cut.col, "cut", cut.row, cut.col, ("cut", cut.row, cut.col))
+        )
+    for index, jumper in enumerate(layout.jumpers):
+        if _jumper_identity_key(jumper) in fixed_jumpers:
+            continue
+        for endpoint_name, hole in (("start", jumper.start), ("end", jumper.end)):
+            units.append(
+                (
+                    -hole[0],
+                    hole[1],
+                    "jumper",
+                    jumper.net_name,
+                    index,
+                    endpoint_name,
+                    ("jumper", index, endpoint_name),
+                )
+            )
+    return tuple(item[-1] for item in sorted(units))
+
+
+def _down_compaction_best_move(layout, circuit, unit):
+    unit_type = unit[0]
+    if unit_type == "component":
+        return _down_compaction_best_component_move(layout, circuit, unit[1])
+    if unit_type == "connector":
+        return _down_compaction_best_connector_move(layout, circuit, unit[1])
+    if unit_type == "cut":
+        return _down_compaction_best_cut_move(layout, circuit, unit[1:])
+    if unit_type == "jumper":
+        return _down_compaction_best_jumper_endpoint_move(
+            layout,
+            circuit,
+            unit[1],
+            unit[2],
+        )
+    return None
+
+
+def _down_compaction_best_component_move(layout, circuit, refdes):
+    footprint_map = _footprints_by_name(layout.footprints)
+    placed_component = _layout_component_by_refdes(layout, refdes)
+    if placed_component is None:
+        return None
+    holes = _placed_component_occupied_holes(placed_component, footprint_map)
+    max_row = max((row for row, _col in holes), default=0)
+    max_delta = layout.board.height_pitches - 1 - max_row
+    if max_delta <= 0:
+        return None
+    row, col = placed_component.origin
+    for delta in range(max_delta, 0, -1):
+        moved = PlacedComponent(
+            refdes=placed_component.refdes,
+            footprint_name=placed_component.footprint_name,
+            origin=(row + delta, col),
+            rotation=placed_component.rotation,
+        )
+        candidate_components = tuple(
+            moved if component.refdes == refdes else component
+            for component in layout.placed_components
+        )
+        accepted = _verified_layout_variant(
+            layout,
+            circuit,
+            placed_components=candidate_components,
+        )
+        if accepted is not None:
+            _logger.debug(
+                "Down-compacted component refdes=%s origin=%s->%s",
+                refdes,
+                placed_component.origin,
+                moved.origin,
+            )
+            return accepted
+    return None
+
+
+def _down_compaction_best_connector_move(layout, circuit, name):
+    connector = _layout_connector_by_name(layout, name)
+    if connector is None or connector.row >= layout.board.height_pitches - 1:
+        return None
+    occupied_holes = _left_compaction_occupied_holes(
+        layout,
+        circuit,
+        ignored_connector_name=connector.name,
+    )
+    for row in range(layout.board.height_pitches - 1, connector.row, -1):
+        hole = (row, connector.col)
+        if hole in occupied_holes:
+            continue
+        candidate_connectors = tuple(
+            (
+                PlacedConnector(
+                    name=candidate.name,
+                    net_name=candidate.net_name,
+                    hole=hole,
+                    label=candidate.label,
+                    kind=candidate.kind,
+                )
+                if candidate.name == name
+                else candidate
+            )
+            for candidate in layout.connectors
+        )
+        accepted = _verified_layout_variant(
+            layout,
+            circuit,
+            connectors=candidate_connectors,
+        )
+        if accepted is not None:
+            _logger.debug(
+                "Down-compacted connector name=%s hole=%s->%s",
+                name,
+                connector.hole,
+                hole,
+            )
+            return accepted
+    return None
+
+
+def _down_compaction_best_cut_move(layout, circuit, cut_key):
+    row, col = cut_key
+    cut_index = _layout_cut_index(layout, row, col)
+    if cut_index is None or row >= layout.board.height_pitches - 1:
+        return None
+    occupied_holes = _left_compaction_occupied_holes(
+        layout,
+        circuit,
+        ignored_cut_index=cut_index,
+    )
+    for candidate_row in range(layout.board.height_pitches - 1, row, -1):
+        if (candidate_row, col) in occupied_holes:
+            continue
+        moved = StripboardCut(row=candidate_row, col=col)
+        candidate_cuts = tuple(
+            moved if index == cut_index else cut
+            for index, cut in enumerate(layout.cuts)
+        )
+        accepted = _verified_layout_variant(layout, circuit, cuts=candidate_cuts)
+        if accepted is not None:
+            _logger.debug(
+                "Down-compacted cut row=%s->%s col=%s",
+                row,
+                candidate_row,
+                col,
+            )
+            return accepted
+    return None
+
+
+def _down_compaction_best_jumper_endpoint_move(
+    layout,
+    circuit,
+    jumper_index,
+    endpoint_name,
+):
+    if jumper_index >= len(layout.jumpers):
+        return None
+    jumper = layout.jumpers[jumper_index]
+    hole = jumper.start if endpoint_name == "start" else jumper.end
+    row, col = hole
+    if row >= layout.board.height_pitches - 1:
+        return None
+    occupied_holes = _left_compaction_occupied_holes(
+        layout,
+        circuit,
+        ignored_jumper_endpoint=(jumper_index, endpoint_name),
+    )
+    for candidate_row in range(layout.board.height_pitches - 1, row, -1):
+        candidate_hole = (candidate_row, col)
+        if candidate_hole in occupied_holes:
+            continue
+        moved = _replace_jumper_endpoint(jumper, endpoint_name, candidate_hole)
+        candidate_jumpers = tuple(
+            moved if index == jumper_index else candidate
+            for index, candidate in enumerate(layout.jumpers)
+        )
+        accepted = _verified_layout_variant(
+            layout,
+            circuit,
+            jumpers=candidate_jumpers,
+        )
+        if accepted is not None:
+            _logger.debug(
+                "Down-compacted jumper endpoint net=%s index=%s endpoint=%s "
+                "hole=%s->%s",
+                jumper.net_name,
+                jumper_index,
+                endpoint_name,
+                hole,
+                candidate_hole,
+            )
+            return accepted
+    return None
+
+
+def _verified_layout_variant(
+    layout,
+    circuit,
+    *,
+    placed_components=None,
+    cuts=None,
+    jumpers=None,
+    connectors=None,
+):
+    candidate, report = _rebuild_planned_stripboard_layout(
+        layout,
+        circuit,
+        board=layout.board,
+        placed_components=(
+            layout.placed_components if placed_components is None else placed_components
+        ),
+        cuts=layout.cuts if cuts is None else cuts,
+        jumpers=layout.jumpers if jumpers is None else jumpers,
+        connectors=layout.connectors if connectors is None else connectors,
+    )
+    if candidate is None or not report.ok:
+        return None
+    if _left_compaction_cut_blocker_collisions(
+        candidate
+    ) - _left_compaction_cut_blocker_collisions(layout):
+        return None
+    return candidate, report
+
+
 def _left_compaction_cut_blocker_collisions(layout):
     cut_holes = {(cut.row, cut.col) for cut in layout.cuts}
     return frozenset(
@@ -1462,6 +2248,22 @@ def _layout_col_sum(layout):
     )
 
 
+def _layout_row_sum(layout):
+    return sum(
+        (
+            *[pin.row for pin in _layout_score_pins(layout)],
+            *[connector.row for connector in layout.connectors],
+            *[cut.row for cut in layout.cuts],
+            *[
+                hole[0]
+                for jumper in layout.jumpers
+                for hole in (jumper.start, jumper.end)
+            ],
+            *[blocker.row for blocker in layout.blockers],
+        )
+    )
+
+
 def _layout_component_by_refdes(layout, refdes):
     for placed_component in layout.placed_components:
         if placed_component.refdes == refdes:
@@ -1481,6 +2283,43 @@ def _layout_cut_index(layout, row, col):
         if cut.row == row and cut.col == col:
             return index
     return None
+
+
+def _layout_jumper_index(layout, jumper):
+    jumper_key = _jumper_identity_key(jumper)
+    for index, candidate in enumerate(layout.jumpers):
+        if _jumper_identity_key(candidate) == jumper_key:
+            return index
+    return None
+
+
+def _jumper_identity_key(jumper):
+    return (jumper.net_name, tuple(sorted((jumper.start, jumper.end))))
+
+
+def _replace_jumper_endpoint(jumper, endpoint_name, hole):
+    if endpoint_name == "start":
+        return Jumper(start=hole, end=jumper.end, net_name=jumper.net_name)
+    return Jumper(start=jumper.start, end=hole, net_name=jumper.net_name)
+
+
+def _conductor_for_hole(physical_netlist, hole):
+    for conductor in physical_netlist.conductors:
+        if hole in set(conductor.holes):
+            return conductor
+    return None
+
+
+def _cut_bounded_segment_bounds(layout, row, col):
+    left = max(
+        (cut.col for cut in layout.cuts if cut.row == row and cut.col < col),
+        default=-1,
+    )
+    right = min(
+        (cut.col for cut in layout.cuts if cut.row == row and cut.col > col),
+        default=layout.board.width_pitches,
+    )
+    return left + 1, right - 1
 
 
 def _placed_component_occupied_holes(placed_component, footprint_map):
@@ -1538,14 +2377,22 @@ def _left_compaction_occupied_holes(
     *,
     ignored_cut_index=None,
     ignored_jumper_endpoint=None,
+    ignored_jumper_indexes=frozenset(),
+    ignored_connector_name=None,
 ):
     holes = {pin.hole for pin in placed_component_pins(layout, circuit)}
-    holes.update(connector.hole for connector in layout.connectors)
+    holes.update(
+        connector.hole
+        for connector in layout.connectors
+        if connector.name != ignored_connector_name
+    )
     holes.update((blocker.row, blocker.col) for blocker in layout.blockers)
     for index, cut in enumerate(layout.cuts):
         if index != ignored_cut_index:
             holes.add((cut.row, cut.col))
     for index, jumper in enumerate(layout.jumpers):
+        if index in ignored_jumper_indexes:
+            continue
         for endpoint_name, hole in (("start", jumper.start), ("end", jumper.end)):
             if ignored_jumper_endpoint == (index, endpoint_name):
                 continue
@@ -1583,12 +2430,13 @@ def write_stripboard_build_outputs(
 
     _logger.info(
         "Writing stripboard build outputs circuit=%s stem=%s output_dir=%s %s "
-        "verification_ok=%s",
+        "verification_ok=%s metrics=%s",
         _circuit_log_name(circuit),
         stem,
         output_dir,
         _layout_log_summary(layout),
         report.ok,
+        _stripboard_density_metrics(layout, circuit).as_dict(),
     )
     render_stripboard_layout(layout, circuit, file=paths.top_svg, scale=scale)
     render_stripboard_layout(layout, circuit, file=paths.top_png, scale=scale)
@@ -2129,12 +2977,16 @@ def _debug_conductor_color(index):
 
 
 def _stripboard_build_checklist_lines(layout, circuit, report):
+    metrics = _stripboard_density_metrics(layout, circuit)
     lines = [
         f"# {circuit.name} Stripboard Build Checklist",
         "",
         f"- Verification: {'OK' if report.ok else 'FAILED'}",
         f"- Board: {layout.board.width_pitches} x {layout.board.height_pitches} holes",
         f"- Pitch: {layout.board.pitch_mm:g} mm",
+        f"- Used area: {metrics.used_width} x {metrics.used_height} holes",
+        f"- Occupied holes: {metrics.occupied_holes} / {metrics.total_holes}",
+        f"- Empty holes: {metrics.empty_holes} ({metrics.empty_ratio:.1%})",
         "",
         "## Components",
     ]
@@ -2197,6 +3049,7 @@ def _stripboard_build_checklist_lines(layout, circuit, report):
 
 
 def _stripboard_build_json_data(layout, circuit, report):
+    metrics = _stripboard_density_metrics(layout, circuit)
     return {
         "circuit": export_netlist(circuit),
         "layout": {
@@ -2243,6 +3096,7 @@ def _stripboard_build_json_data(layout, circuit, report):
                 }
                 for blocker in layout.blockers
             ],
+            "metrics": metrics.as_dict(),
         },
         "verification": {
             "ok": report.ok,
@@ -3299,6 +4153,10 @@ def _routing_candidate_limit():
 
 def _routing_shake_order_limit():
     return 4
+
+
+def _optimization_cycle_limit():
+    return 3
 
 
 def _routing_shake_jumper_threshold():

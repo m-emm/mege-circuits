@@ -487,6 +487,187 @@ def test_left_compaction_keeps_jumper_endpoints_inside_cut_bounded_segment():
     assert compacted.jumpers == (Jumper(start=(0, 1), end=(1, 4), net_name="n"),)
 
 
+def test_stripboard_density_metrics_count_unique_occupied_and_empty_holes():
+    footprints = (
+        Footprint(
+            name="test_pin",
+            component_kinds=("test_pin",),
+            pins={"pin": (0, 0)},
+            allowed_rotations=(0,),
+        ),
+    )
+    circuit = Circuit(
+        name="density_metrics",
+        components=(
+            Component("P1", "test_pin", None, (Terminal("pin", "n"),)),
+            Component("P2", "test_pin", None, (Terminal("pin", "n"),)),
+        ),
+        nets=(create_net("n"),),
+    )
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(5, 3),
+        footprints=footprints,
+        placements={
+            "P1": ("test_pin", (0, 0), 0),
+            "P2": ("test_pin", (1, 1), 0),
+        },
+        cuts=((0, 3),),
+        jumpers=(((0, 4), (1, 4), "n"),),
+        connectors=(("J_n", "n", (0, 2), "N"),),
+        blockers=(StripboardBlocker(row=1, col=2, element_name="keepout"),),
+    )
+
+    metrics = physical._stripboard_density_metrics(layout, circuit)
+
+    assert metrics.total_holes == 15
+    assert metrics.component_pin_holes == 2
+    assert metrics.connector_holes == 1
+    assert metrics.cut_holes == 1
+    assert metrics.blocker_holes == 1
+    assert metrics.jumper_endpoint_holes == 2
+    assert metrics.occupied_holes == 7
+    assert metrics.empty_holes == 8
+    assert metrics.empty_ratio == pytest.approx(8 / 15)
+
+
+def test_optimizer_absorbs_connector_only_bridge_into_target_conductor():
+    footprints = (
+        Footprint(
+            name="test_pin",
+            component_kinds=("test_pin",),
+            pins={"pin": (0, 0)},
+            allowed_rotations=(0,),
+        ),
+    )
+    circuit = Circuit(
+        name="connector_bridge",
+        components=(Component("P1", "test_pin", None, (Terminal("pin", "n"),)),),
+        nets=(create_net("n"),),
+    )
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(5, 2),
+        footprints=footprints,
+        placements={"P1": ("test_pin", (0, 0), 0)},
+        jumpers=(((1, 1), (0, 1), "n"),),
+        connectors=(("J_n", "n", (1, 0), "N"),),
+    )
+
+    optimized, report, changed = physical._absorb_connector_only_jumpers(
+        layout,
+        circuit,
+    )
+
+    assert changed
+    assert report.ok, report.summary()
+    assert optimized.jumpers == ()
+    assert optimized.connectors == (PlacedConnector("J_n", "n", (0, 1), "N"),)
+
+
+def test_optimizer_keeps_fixed_connector_only_bridge():
+    footprints = (
+        Footprint(
+            name="test_pin",
+            component_kinds=("test_pin",),
+            pins={"pin": (0, 0)},
+            allowed_rotations=(0,),
+        ),
+    )
+    circuit = Circuit(
+        name="fixed_connector_bridge",
+        components=(Component("P1", "test_pin", None, (Terminal("pin", "n"),)),),
+        nets=(create_net("n"),),
+    )
+    fixed_jumper = Jumper(start=(1, 1), end=(0, 1), net_name="n")
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(5, 2),
+        footprints=footprints,
+        placements={"P1": ("test_pin", (0, 0), 0)},
+        jumpers=(fixed_jumper,),
+        connectors=(("J_n", "n", (1, 0), "N"),),
+    )
+
+    optimized, report, changed = physical._absorb_connector_only_jumpers(
+        layout,
+        circuit,
+        fixed_jumper_keys=frozenset((physical._jumper_identity_key(fixed_jumper),)),
+    )
+
+    assert not changed
+    assert report.ok, report.summary()
+    assert optimized.jumpers == (fixed_jumper,)
+    assert optimized.connectors == (PlacedConnector("J_n", "n", (1, 0), "N"),)
+
+
+def test_right_relax_moves_connector_to_rightmost_empty_hole_before_cut():
+    footprints = (
+        Footprint(
+            name="test_pin",
+            component_kinds=("test_pin",),
+            pins={"pin": (0, 0)},
+            allowed_rotations=(0,),
+        ),
+    )
+    circuit = Circuit(
+        name="right_relax_connector",
+        components=(Component("P1", "test_pin", None, (Terminal("pin", "n"),)),),
+        nets=(create_net("n"),),
+    )
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(6, 1),
+        footprints=footprints,
+        placements={"P1": ("test_pin", (0, 2), 0)},
+        cuts=((0, 4),),
+        connectors=(("J_n", "n", (0, 0), "N"),),
+        blockers=(StripboardBlocker(row=0, col=1, element_name="keepout"),),
+    )
+
+    optimized, report, changed = physical._right_relax_flexible_terminals(
+        layout,
+        circuit,
+    )
+
+    assert changed
+    assert report.ok, report.summary()
+    assert optimized.connectors == (PlacedConnector("J_n", "n", (0, 3), "N"),)
+
+
+def test_down_compaction_moves_verified_point_units_down():
+    footprints = (
+        Footprint(
+            name="test_pin",
+            component_kinds=("test_pin",),
+            pins={"pin": (0, 0)},
+            allowed_rotations=(0,),
+        ),
+    )
+    circuit = Circuit(
+        name="down_compaction",
+        components=(Component("P1", "test_pin", None, (Terminal("pin", "n"),)),),
+        nets=(create_net("n"),),
+    )
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(4, 3),
+        footprints=footprints,
+        placements={"P1": ("test_pin", (0, 0), 0)},
+        cuts=((0, 3),),
+    )
+
+    optimized, report, changed = physical._down_compact_stripboard_layout(
+        layout,
+        circuit,
+    )
+
+    assert changed
+    assert report.ok, report.summary()
+    assert optimized.placed_components == (PlacedComponent("P1", "test_pin", (2, 0)),)
+    assert optimized.cuts == (StripboardCut(row=2, col=3),)
+
+
 def test_bridge_first_score_prefers_fewer_jumpers_over_narrower_width():
     footprints = (
         Footprint(
@@ -781,6 +962,7 @@ def test_write_stripboard_build_outputs_writes_build_artifacts(tmp_path):
         encoding="utf-8"
     )
     assert "## Top Jumpers" in outputs.checklist_md.read_text(encoding="utf-8")
+    assert "Empty holes:" in outputs.checklist_md.read_text(encoding="utf-8")
     data = json.loads(outputs.data_json.read_text(encoding="utf-8"))
     assert data["verification"]["ok"] is True
     assert data["layout"]["board"] == {
@@ -789,6 +971,8 @@ def test_write_stripboard_build_outputs_writes_build_artifacts(tmp_path):
         "strip_direction": "horizontal",
         "width_pitches": 5,
     }
+    assert data["layout"]["metrics"]["total_holes"] == 40
+    assert data["layout"]["metrics"]["empty_holes"] >= 0
 
 
 def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(tmp_path):
@@ -798,9 +982,10 @@ def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(tmp_path):
     assert layout.board.width_pitches <= 14
     assert layout.board.height_pitches == 9
     assert len(layout.cuts) <= 5
-    assert len(layout.jumpers) <= 2
+    assert len(layout.jumpers) <= 1
     assert physical._left_compaction_cut_blocker_collisions(layout) == frozenset()
     assert all(jumper.net_name != "ena_plus" for jumper in layout.jumpers)
+    assert all(jumper.net_name != "step_pul_minus" for jumper in layout.jumpers)
     _assert_jumper_endpoints_are_dedicated(layout, circuit)
     assert any(
         component.refdes == "Q3"
@@ -876,8 +1061,13 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(tmp_path, caplog):
     assert data["layout"]["board"]["width_pitches"] <= 14
     assert data["layout"]["board"]["height_pitches"] == 9
     assert len(data["layout"]["cuts"]) <= 5
-    assert len(data["layout"]["jumpers"]) <= 2
+    assert len(data["layout"]["jumpers"]) <= 1
     assert all(jumper["net_name"] != "ena_plus" for jumper in data["layout"]["jumpers"])
+    assert all(
+        jumper["net_name"] != "step_pul_minus" for jumper in data["layout"]["jumpers"]
+    )
+    assert data["layout"]["metrics"]["total_holes"] <= 126
+    assert data["layout"]["metrics"]["empty_holes"] >= 0
     assert top_svg.count('class="layout-jumper-endpoint"') == 2 * len(
         data["layout"]["jumpers"]
     )
