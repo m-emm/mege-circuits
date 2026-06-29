@@ -15,6 +15,7 @@ from mege_circuits.simple import (
     PlacedPin,
     StripboardBlocker,
     StripboardCut,
+    StripboardRoutingHints,
     circuit_from_schema,
     create_manual_stripboard_layout,
     create_stripboard,
@@ -22,7 +23,10 @@ from mege_circuits.simple import (
     extract_physical_netlist,
     footprint_for_component,
     placed_component_pins,
+    plan_stripboard,
     render_stripboard_layout,
+    score_stripboard_layout,
+    stripboard_hints_from_schema,
     verify_stripboard_layout,
 )
 
@@ -185,6 +189,73 @@ def test_extract_physical_netlist_respects_strip_cuts():
     assert _conductors_by_net(report.physical_netlist)["midpoint"][0].net_names == (
         "midpoint",
     )
+
+
+def test_plan_stripboard_routes_voltage_divider_with_verified_layout():
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+
+    layout, report = plan_stripboard(
+        circuit,
+        board=create_stripboard(5, 5),
+    )
+
+    assert layout is not None
+    assert report.ok, report.summary()
+    assert score_stripboard_layout(layout, circuit, report) == (0, 4, 2, 5, 4)
+    assert [component.refdes for component in layout.placed_components] == ["R1", "R2"]
+    assert {(cut.row, cut.col) for cut in layout.cuts} == {(3, 1), (4, 1)}
+
+
+def test_plan_stripboard_uses_projection_hints_from_schema():
+    schema = create_voltage_divider()
+    circuit = circuit_from_schema(schema, name="manual_divider")
+    hints = stripboard_hints_from_schema(schema)
+
+    layout, report = plan_stripboard(
+        circuit,
+        board=create_stripboard(8, 5),
+        hints=hints,
+    )
+
+    assert isinstance(hints, StripboardRoutingHints)
+    assert report.ok, report.summary()
+    assert layout.placed_components[0].refdes == "R1"
+    assert layout.placed_components[0].origin[1] == 2
+
+
+def test_plan_stripboard_routes_high_side_switch_with_jumpers_and_cuts():
+    circuit = circuit_from_schema(create_high_side_switch(), name="high_side_switch")
+
+    layout, report = plan_stripboard(
+        circuit,
+        board=create_stripboard(8, 20),
+    )
+
+    assert layout is not None
+    assert report.ok, report.summary()
+    assert len(layout.placed_components) == len(circuit.components)
+    assert len(layout.jumpers) == sum(
+        len(component.terminals) for component in circuit.components
+    )
+    assert {
+        pin.net_name
+        for conductor in report.physical_netlist.conductors
+        for pin in conductor.pins
+    } == {net.name for net in circuit.nets}
+
+
+def test_plan_stripboard_reports_failure_for_too_small_board():
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+
+    layout, report = plan_stripboard(
+        circuit,
+        board=create_stripboard(5, 4),
+    )
+
+    assert layout is None
+    assert not report.ok
+    assert report.errors[0].code == "routing_failed"
+    assert "needs component row" in report.summary()
 
 
 def test_verify_stripboard_layout_reports_open_circuit():

@@ -503,6 +503,14 @@ The key behavioral change is that routing results must be accepted because
 physical extraction verifies them, not because the projection algorithm created
 them.
 
+Implementation status: this phase now has a conservative first router through
+`plan_stripboard(...)`, `stripboard_hints_from_schema(...)`, and
+`score_stripboard_layout(...)` in `mege_circuits.physical`, exposed through
+`mege_circuits.simple`. The router creates one bus row per semantic net, places
+components on physical footprint rows, inserts isolation cuts between different
+net pins on the same strip, adds top-side jumpers from pins to their net bus
+rows, and accepts results only after `verify_stripboard_layout(...)` passes.
+
 ### Phase 5: Produce Build Outputs
 
 Once layouts verify, add build-oriented outputs:

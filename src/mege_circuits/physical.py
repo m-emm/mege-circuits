@@ -163,6 +163,42 @@ class PhysicalVerificationReport:
         )
 
 
+@dataclass(frozen=True)
+class StripboardRoutingHints:
+    """Placement hints for the conservative stripboard router."""
+
+    net_rows: Mapping[str, int] = field(default_factory=dict)
+    component_columns: Mapping[str, int] = field(default_factory=dict)
+    component_order: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(
+            self,
+            "net_rows",
+            MappingProxyType(
+                {
+                    str(net_name): _coerce_integer(row, "net row")
+                    for net_name, row in self.net_rows.items()
+                }
+            ),
+        )
+        object.__setattr__(
+            self,
+            "component_columns",
+            MappingProxyType(
+                {
+                    str(refdes): _coerce_integer(column, "component column")
+                    for refdes, column in self.component_columns.items()
+                }
+            ),
+        )
+        object.__setattr__(
+            self,
+            "component_order",
+            tuple(str(refdes) for refdes in self.component_order),
+        )
+
+
 def default_footprints():
     """Return the built-in through-hole footprint library."""
 
@@ -184,14 +220,16 @@ def default_footprints():
         Footprint(
             name="to92_cbe",
             component_kinds=("bjt_npn",),
-            pins={"collector": (0, 0), "base": (0, 1), "emitter": (0, 2)},
+            pins={"collector": (0, 0), "base": (0, 2), "emitter": (0, 4)},
             allowed_rotations=(0, 180),
+            blockers=((0, 1), (0, 3)),
         ),
         Footprint(
             name="to220_gds",
             component_kinds=("pmos",),
-            pins={"gate": (0, 0), "drain": (0, 1), "source": (0, 2)},
+            pins={"gate": (0, 0), "drain": (0, 2), "source": (0, 4)},
             allowed_rotations=(0, 180),
+            blockers=((0, 1), (0, 3)),
         ),
     )
 
@@ -305,6 +343,147 @@ def verify_stripboard_layout(layout, circuit):
     return PhysicalVerificationReport(tuple(issues), physical_netlist=physical_netlist)
 
 
+def stripboard_hints_from_schema(schema):
+    """Derive deterministic routing hints from the legacy schematic projection."""
+
+    if not isinstance(schema, dsl.Schema):
+        raise TypeError("stripboard_hints_from_schema expects a Schema object.")
+
+    assignment = dsl.assign_schema_nets_to_stripboard(schema)
+    terminal_columns_by_component = {}
+    for marker_key, column in assignment.marker_column_maps.items():
+        if len(marker_key) != 3 or marker_key[0] != "terminal":
+            continue
+        _kind, refdes, _terminal_name = marker_key
+        terminal_columns_by_component.setdefault(refdes, []).append(column)
+
+    component_columns = {}
+    for element in schema.elements:
+        columns = terminal_columns_by_component.get(element.name)
+        if columns:
+            component_columns[element.name] = int(round(sum(columns) / len(columns)))
+        else:
+            component_columns[element.name] = int(round(element.position[0]))
+
+    component_order = tuple(
+        refdes
+        for refdes, _column in sorted(
+            component_columns.items(),
+            key=lambda item: (item[1], item[0]),
+        )
+    )
+    return StripboardRoutingHints(
+        net_rows=assignment.net_rows,
+        component_columns=component_columns,
+        component_order=component_order,
+    )
+
+
+def plan_stripboard(
+    circuit,
+    *,
+    board,
+    footprints=None,
+    hints=None,
+    fixed_placements=None,
+    fixed_cuts=(),
+    fixed_jumpers=(),
+):
+    """Route a conservative, verification-gated stripboard layout."""
+
+    if not isinstance(circuit, Circuit):
+        raise TypeError("plan_stripboard expects a Circuit object.")
+    if not isinstance(board, Stripboard):
+        raise TypeError("board must be a Stripboard object.")
+    if board.strip_direction is not Direction.HORIZONTAL:
+        return None, _routing_failure_report(
+            "Only horizontal stripboards are supported by the first router.",
+            code="unsupported_strip_direction",
+        )
+    routing_hints = _coerce_routing_hints(hints)
+
+    try:
+        footprint_map = _footprints_by_name(
+            default_footprints() if footprints is None else footprints
+        )
+        fixed_placement_map = _normalize_fixed_placements(
+            fixed_placements or {},
+            circuit,
+            footprint_map,
+        )
+        normalized_fixed_cuts = _normalize_cuts(fixed_cuts)
+        normalized_fixed_jumpers = _normalize_jumpers(fixed_jumpers)
+    except (TypeError, ValueError) as error:
+        return None, _routing_failure_report(str(error))
+
+    net_rows = _routing_net_rows(circuit, routing_hints)
+    planned, placement_error = _route_component_placements(
+        circuit,
+        board,
+        footprint_map,
+        routing_hints,
+        fixed_placement_map,
+        net_rows,
+    )
+    if placement_error is not None:
+        return None, _routing_failure_report(placement_error)
+
+    cuts = list(normalized_fixed_cuts)
+    jumpers = list(normalized_fixed_jumpers)
+    for component in circuit.components:
+        placed_component = planned[component.refdes]
+        footprint = footprint_map[placed_component.footprint_name]
+        component_cuts, cut_error = _routing_component_cuts(
+            component,
+            placed_component,
+            footprint,
+        )
+        if cut_error is not None:
+            return None, _routing_failure_report(cut_error)
+        cuts.extend(component_cuts)
+        jumpers.extend(
+            _routing_component_jumpers(
+                component,
+                placed_component,
+                footprint,
+                net_rows,
+            )
+        )
+
+    try:
+        layout = create_manual_stripboard_layout(
+            circuit,
+            board=board,
+            footprints=tuple(footprint_map[name] for name in sorted(footprint_map)),
+            placements=planned,
+            cuts=_dedupe_cuts(cuts),
+            jumpers=_dedupe_jumpers(jumpers),
+        )
+    except (TypeError, ValueError) as error:
+        return None, _routing_failure_report(str(error))
+
+    report = verify_stripboard_layout(layout, circuit)
+    if not report.ok:
+        return layout, report
+    return layout, report
+
+
+def score_stripboard_layout(layout, circuit, report=None):
+    """Return a deterministic score tuple for comparing routed layouts."""
+
+    if report is None:
+        report = verify_stripboard_layout(layout, circuit)
+    if not isinstance(report, PhysicalVerificationReport):
+        raise TypeError("report must be a PhysicalVerificationReport.")
+    return (
+        len(report.errors),
+        len(layout.jumpers),
+        len(layout.cuts),
+        _layout_used_height(layout),
+        _layout_used_width(layout),
+    )
+
+
 def render_stripboard_layout(layout, circuit, file, scale=32):
     """Render a manual physical stripboard layout as SVG or PNG."""
 
@@ -354,6 +533,328 @@ def _validate_physical_inputs(layout, circuit):
         raise TypeError("circuit must be a Circuit object.")
     if not isinstance(layout.board, Stripboard):
         raise TypeError("layout.board must be a Stripboard object.")
+
+
+def _coerce_routing_hints(hints):
+    if hints is None:
+        return StripboardRoutingHints()
+    if not isinstance(hints, StripboardRoutingHints):
+        raise TypeError("hints must be a StripboardRoutingHints object.")
+    return hints
+
+
+def _normalize_fixed_placements(fixed_placements, circuit, footprint_map):
+    if not isinstance(fixed_placements, Mapping):
+        raise TypeError("fixed_placements must be a mapping.")
+    components_by_refdes = {
+        component.refdes: component for component in circuit.components
+    }
+    fixed = {}
+    for refdes, placement in fixed_placements.items():
+        if refdes not in components_by_refdes:
+            raise ValueError(f"Fixed placement refers to unknown component {refdes!r}.")
+        fixed[refdes] = _coerce_placement(
+            refdes,
+            components_by_refdes[refdes],
+            placement,
+            footprint_map,
+        )
+    return fixed
+
+
+def _routing_net_rows(circuit, hints):
+    hinted_rows = hints.net_rows
+    net_names = tuple(net.name for net in circuit.nets)
+    ordered_net_names = tuple(
+        sorted(
+            net_names,
+            key=lambda name: (
+                hinted_rows.get(name, len(hinted_rows)),
+                name,
+            ),
+        )
+    )
+    return {net_name: row for row, net_name in enumerate(ordered_net_names)}
+
+
+def _route_component_placements(
+    circuit,
+    board,
+    footprint_map,
+    hints,
+    fixed_placements,
+    net_rows,
+):
+    components_by_refdes = {
+        component.refdes: component for component in circuit.components
+    }
+    planned = dict(fixed_placements)
+    ordered_refdeses = _routing_component_order(circuit, hints)
+    next_row = len(net_rows)
+
+    fixed_rows = []
+    for placed_component in fixed_placements.values():
+        footprint = footprint_map[placed_component.footprint_name]
+        fixed_rows.extend(
+            row for row, _col in _absolute_footprint_holes(placed_component, footprint)
+        )
+    if fixed_rows:
+        next_row = max(next_row, max(fixed_rows) + 1)
+
+    for refdes in ordered_refdeses:
+        if refdes in planned:
+            continue
+        component = components_by_refdes[refdes]
+        try:
+            footprint = footprint_for_component(component, footprint_map)
+        except ValueError as error:
+            return None, str(error)
+        if next_row >= board.height_pitches:
+            return None, (
+                f"Board has {board.height_pitches} rows, but routing "
+                f"{refdes!r} needs component row {next_row}."
+            )
+        placed_component, error = _route_single_component_placement(
+            component,
+            footprint,
+            board,
+            row=next_row,
+            preferred_column=hints.component_columns.get(refdes, 0),
+        )
+        if error is not None:
+            return None, error
+        planned[refdes] = placed_component
+        next_row += 1
+
+    missing = tuple(sorted(set(components_by_refdes) - set(planned)))
+    if missing:
+        return None, f"Missing routed placements for components {missing}."
+    return planned, None
+
+
+def _routing_component_order(circuit, hints):
+    component_refdeses = {component.refdes for component in circuit.components}
+    ordered = []
+    seen = set()
+    for refdes in hints.component_order:
+        if refdes not in component_refdeses or refdes in seen:
+            continue
+        ordered.append(refdes)
+        seen.add(refdes)
+    remaining = sorted(component_refdeses - seen)
+    return tuple((*ordered, *remaining))
+
+
+def _route_single_component_placement(
+    component, footprint, board, row, preferred_column
+):
+    for rotation in _preferred_footprint_rotations(footprint):
+        relative_points = tuple(
+            _rotate_grid_point(point, rotation) for point in footprint.pins.values()
+        )
+        if {point[0] for point in relative_points} != {0}:
+            continue
+        min_col = min(point[1] for point in relative_points)
+        max_col = max(point[1] for point in relative_points)
+        width = max_col - min_col + 1
+        if width > board.width_pitches:
+            continue
+        origin_col = int(
+            _clamp(
+                preferred_column - min_col,
+                -min_col,
+                board.width_pitches - 1 - max_col,
+            )
+        )
+        placed_component = PlacedComponent(
+            refdes=component.refdes,
+            footprint_name=footprint.name,
+            origin=(row, origin_col),
+            rotation=rotation,
+        )
+        if not _routing_component_isolatable(component, placed_component, footprint):
+            continue
+        return placed_component, None
+    return None, (
+        f"No horizontal, cut-isolatable placement is available for "
+        f"{component.refdes!r} with footprint {footprint.name!r}."
+    )
+
+
+def _preferred_footprint_rotations(footprint):
+    preferred = (0, 180, 90, 270)
+    return tuple(
+        rotation
+        for rotation in preferred
+        if rotation in set(footprint.allowed_rotations)
+    )
+
+
+def _routing_component_isolatable(component, placed_component, footprint):
+    pins_by_row = _component_route_pins_by_row(component, placed_component, footprint)
+    for row_pins in pins_by_row.values():
+        sorted_pins = sorted(row_pins, key=lambda item: item[2])
+        for left, right in zip(sorted_pins, sorted_pins[1:]):
+            if left[0].net_name == right[0].net_name:
+                continue
+            if right[2] - left[2] < 2:
+                return False
+    return True
+
+
+def _routing_component_cuts(component, placed_component, footprint):
+    cuts = []
+    pins_by_row = _component_route_pins_by_row(component, placed_component, footprint)
+    for row, row_pins in pins_by_row.items():
+        sorted_pins = sorted(row_pins, key=lambda item: item[2])
+        pin_columns = {col for _pin, _row, col in sorted_pins}
+        for left, right in zip(sorted_pins, sorted_pins[1:]):
+            left_pin, _left_row, left_col = left
+            right_pin, _right_row, right_col = right
+            if left_pin.net_name == right_pin.net_name:
+                continue
+            cut_col = _first_cut_column_between(left_col, right_col, pin_columns)
+            if cut_col is None:
+                return (), (
+                    f"Cannot isolate {placed_component.refdes!r} pins "
+                    f"{left_pin.terminal_name!r} and {right_pin.terminal_name!r}; "
+                    "there is no empty hole between them for a strip cut."
+                )
+            cuts.append(StripboardCut(row=row, col=cut_col))
+    return tuple(cuts), None
+
+
+def _routing_component_jumpers(component, placed_component, footprint, net_rows):
+    jumpers = []
+    for pin, row, col in _component_route_pins(component, placed_component, footprint):
+        target = (net_rows[pin.net_name], col)
+        if target == (row, col):
+            continue
+        jumpers.append(Jumper(start=(row, col), end=target, net_name=pin.net_name))
+    return tuple(jumpers)
+
+
+def _component_route_pins_by_row(component, placed_component, footprint):
+    pins_by_row = {}
+    for pin, row, col in _component_route_pins(component, placed_component, footprint):
+        pins_by_row.setdefault(row, []).append((pin, row, col))
+    return pins_by_row
+
+
+def _component_route_pins(component, placed_component, footprint):
+    for terminal in component.terminals:
+        if terminal.name not in footprint.pins:
+            continue
+        row, col = _absolute_footprint_point(
+            placed_component.origin,
+            placed_component.rotation,
+            footprint.pins[terminal.name],
+        )
+        yield (
+            PlacedPin(
+                refdes=component.refdes,
+                terminal_name=terminal.name,
+                net_name=terminal.net_name,
+                row=row,
+                col=col,
+                footprint_name=footprint.name,
+            ),
+            row,
+            col,
+        )
+
+
+def _absolute_footprint_holes(placed_component, footprint):
+    return tuple(
+        _absolute_footprint_point(
+            placed_component.origin,
+            placed_component.rotation,
+            point,
+        )
+        for point in footprint.pins.values()
+    )
+
+
+def _first_cut_column_between(left_col, right_col, pin_columns):
+    for cut_col in range(left_col + 1, right_col):
+        if cut_col not in pin_columns:
+            return cut_col
+    return None
+
+
+def _dedupe_cuts(cuts):
+    cuts_by_hole = {}
+    for cut in cuts:
+        cuts_by_hole.setdefault((cut.row, cut.col), cut)
+    return tuple(cuts_by_hole[key] for key in sorted(cuts_by_hole))
+
+
+def _dedupe_jumpers(jumpers):
+    jumpers_by_key = {}
+    for jumper in jumpers:
+        key = (jumper.net_name, jumper.start, jumper.end)
+        reverse_key = (jumper.net_name, jumper.end, jumper.start)
+        if reverse_key in jumpers_by_key:
+            continue
+        jumpers_by_key.setdefault(key, jumper)
+    return tuple(jumpers_by_key[key] for key in sorted(jumpers_by_key))
+
+
+def _routing_failure_report(message, code="routing_failed"):
+    return PhysicalVerificationReport(
+        issues=(
+            PhysicalIssue(
+                ERROR,
+                code,
+                str(message),
+            ),
+        ),
+        physical_netlist=None,
+    )
+
+
+def _layout_used_height(layout):
+    rows = [
+        *[pin.row for pin in _layout_score_pins(layout)],
+        *[cut.row for cut in layout.cuts],
+        *[hole[0] for jumper in layout.jumpers for hole in (jumper.start, jumper.end)],
+        *[blocker.row for blocker in layout.blockers],
+    ]
+    return 0 if not rows else max(rows) + 1
+
+
+def _layout_used_width(layout):
+    cols = [
+        *[pin.col for pin in _layout_score_pins(layout)],
+        *[cut.col for cut in layout.cuts],
+        *[hole[1] for jumper in layout.jumpers for hole in (jumper.start, jumper.end)],
+        *[blocker.col for blocker in layout.blockers],
+    ]
+    return 0 if not cols else max(cols) + 1
+
+
+def _layout_score_pins(layout):
+    footprint_map = _footprints_by_name(layout.footprints)
+    pins = []
+    for placed_component in layout.placed_components:
+        footprint = footprint_map[placed_component.footprint_name]
+        for terminal_name, point in footprint.pins.items():
+            row, col = _absolute_footprint_point(
+                placed_component.origin,
+                placed_component.rotation,
+                point,
+            )
+            pins.append(
+                PlacedPin(
+                    refdes=placed_component.refdes,
+                    terminal_name=terminal_name,
+                    net_name="",
+                    row=row,
+                    col=col,
+                    footprint_name=footprint.name,
+                )
+            )
+    return tuple(pins)
 
 
 def _physical_layout_drc_issues(layout, circuit):
@@ -1459,6 +1960,12 @@ def _normalize_rotation(rotation):
     return normalized
 
 
+def _coerce_integer(value, label):
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{label} must be an integer.")
+    return value
+
+
 def _coerce_grid_point(point, label):
     if not isinstance(point, tuple) or len(point) != 2:
         raise TypeError(f"{label} must be a (row, col) tuple.")
@@ -1468,6 +1975,10 @@ def _coerce_grid_point(point, label):
     if not isinstance(col, int) or isinstance(col, bool):
         raise TypeError(f"{label} col must be an integer.")
     return row, col
+
+
+def _clamp(value, low, high):
+    return max(low, min(high, value))
 
 
 def _require_hole_on_board(board, row, col, label):
