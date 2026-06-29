@@ -184,9 +184,23 @@ def test_render_stripboard_layout_writes_svg_and_png(tmp_path):
     )
     svg_path = tmp_path / "manual_layout.svg"
     png_path = tmp_path / "manual_layout.png"
+    values_svg_path = tmp_path / "manual_layout_values.svg"
+    values_png_path = tmp_path / "manual_layout_values.png"
 
     render_stripboard_layout(layout, circuit, file=svg_path)
     render_stripboard_layout(layout, circuit, file=png_path)
+    render_stripboard_layout(
+        layout,
+        circuit,
+        file=values_svg_path,
+        component_labels="refdes_value",
+    )
+    render_stripboard_layout(
+        layout,
+        circuit,
+        file=values_png_path,
+        component_labels="refdes_value",
+    )
 
     svg = svg_path.read_text(encoding="utf-8")
     assert "<svg" in svg
@@ -201,7 +215,24 @@ def test_render_stripboard_layout_writes_svg_and_png(tmp_path):
     assert svg.index('class="layout-component"') < svg.index(
         'class="layout-component-body-label"'
     )
+    assert ">R1</text>" in svg
+    assert ">R1 10K</text>" not in svg
     assert png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+    values_svg = values_svg_path.read_text(encoding="utf-8")
+    assert ">R1 10K</text>" in values_svg
+    assert ">R2 20K</text>" in values_svg
+    assert 'class="layout-component-body"' not in values_svg
+    assert 'data-element="R1" data-value="10K" data-label="R1 10K"' in values_svg
+    assert values_png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+    with pytest.raises(ValueError, match="component_labels"):
+        render_stripboard_layout(
+            layout,
+            circuit,
+            file=tmp_path / "bad_label_mode.svg",
+            component_labels="values",
+        )
 
     annotated_path = tmp_path / "manual_layout_annotated.svg"
     render_stripboard_layout(layout, circuit, file=annotated_path, detail="annotated")
@@ -1056,6 +1087,11 @@ def test_write_stripboard_build_outputs_writes_build_artifacts(tmp_path):
     assert isinstance(outputs, StripboardBuildOutputs)
     assert all(path.exists() for path in outputs.as_tuple())
     assert 'class="layout-pin"' in outputs.top_svg.read_text(encoding="utf-8")
+    assert ">R1 10K</text>" in outputs.top_values_svg.read_text(encoding="utf-8")
+    assert 'class="layout-component-body"' not in outputs.top_values_svg.read_text(
+        encoding="utf-8"
+    )
+    assert outputs.top_values_png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     assert 'class="bottom-strip-cut"' in outputs.bottom_svg.read_text(encoding="utf-8")
     assert 'class="debug-conductor-hole"' in outputs.debug_svg.read_text(
         encoding="utf-8"
@@ -1185,6 +1221,14 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(
         tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}.png",
         outputs.top_png,
     )
+    _assert_latest_artifact_link(
+        tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}_values.svg",
+        outputs.top_values_svg,
+    )
+    _assert_latest_artifact_link(
+        tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}_values.png",
+        outputs.top_values_png,
+    )
     assert (
         outputs.top_svg.read_text(encoding="utf-8").count(
             'class="layout-terminal-hole-label"'
@@ -1195,6 +1239,20 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(
         encoding="utf-8"
     )
     assert 'data-connector="STEP_minus"' in outputs.top_svg.read_text(encoding="utf-8")
+    values_svg = outputs.top_values_svg.read_text(encoding="utf-8")
+    assert 'class="layout-component-body"' not in values_svg
+    assert ">BC337</text>" not in values_svg
+    for value in (
+        "Q1 BC337",
+        "Q2 BC337",
+        "Q3 BC337",
+        "C1 100nF",
+        "R1 2k2",
+        "R2 47k",
+        "R5 4k7 0.25W",
+    ):
+        assert f">{value}</text>" in values_svg
+    assert ">R1 2k2</text>" not in outputs.top_svg.read_text(encoding="utf-8")
     assert 'class="bottom-connector"' in outputs.bottom_svg.read_text(encoding="utf-8")
     assert "## External Connectors" in outputs.checklist_md.read_text(encoding="utf-8")
     data = json.loads(outputs.data_json.read_text(encoding="utf-8"))

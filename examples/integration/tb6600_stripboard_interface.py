@@ -662,6 +662,7 @@ def _new_tb6600_artifact_run_id():
 def _tb6600_artifact_family_stems(stem):
     return (
         stem,
+        f"{stem}_values",
         f"{stem}_bottom",
         f"{stem}_debug",
         f"{stem}_checklist",

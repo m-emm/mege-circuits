@@ -345,6 +345,8 @@ class StripboardRoutingHints:
 class StripboardBuildOutputs:
     top_svg: Path
     top_png: Path
+    top_values_svg: Path
+    top_values_png: Path
     bottom_svg: Path
     bottom_png: Path
     debug_svg: Path
@@ -356,6 +358,8 @@ class StripboardBuildOutputs:
         return (
             self.top_svg,
             self.top_png,
+            self.top_values_svg,
+            self.top_values_png,
             self.bottom_svg,
             self.bottom_png,
             self.debug_svg,
@@ -2678,6 +2682,20 @@ def write_stripboard_build_outputs(
     )
     render_stripboard_layout(layout, circuit, file=paths.top_svg, scale=scale)
     render_stripboard_layout(layout, circuit, file=paths.top_png, scale=scale)
+    render_stripboard_layout(
+        layout,
+        circuit,
+        file=paths.top_values_svg,
+        scale=scale,
+        component_labels="refdes_value",
+    )
+    render_stripboard_layout(
+        layout,
+        circuit,
+        file=paths.top_values_png,
+        scale=scale,
+        component_labels="refdes_value",
+    )
     render_stripboard_bottom(layout, circuit, file=paths.bottom_svg, scale=scale)
     render_stripboard_bottom(layout, circuit, file=paths.bottom_png, scale=scale)
     render_stripboard_debug(
@@ -2778,7 +2796,15 @@ def write_stripboard_build_json(layout, circuit, report, file):
     _logger.debug("Wrote stripboard build JSON file=%s", file)
 
 
-def render_stripboard_layout(layout, circuit, file, scale=32, *, detail="assembly"):
+def render_stripboard_layout(
+    layout,
+    circuit,
+    file,
+    scale=32,
+    *,
+    detail="assembly",
+    component_labels="refdes",
+):
     """Render a manual physical stripboard layout as SVG or PNG."""
 
     if not isinstance(layout, PhysicalLayout):
@@ -2788,22 +2814,38 @@ def render_stripboard_layout(layout, circuit, file, scale=32, *, detail="assembl
     if layout.board.strip_direction is not Direction.HORIZONTAL:
         raise NotImplementedError("Only horizontal stripboards are supported for now.")
     detail = _validate_layout_detail(detail)
+    component_labels = _validate_component_label_mode(component_labels)
 
     _validate_layout_geometry(layout, circuit, _footprints_by_name(layout.footprints))
 
     path = Path(file)
     _logger.debug(
-        "Rendering stripboard layout file=%s detail=%s scale=%s %s",
+        "Rendering stripboard layout file=%s detail=%s component_labels=%s scale=%s %s",
         path,
         detail,
+        component_labels,
         scale,
         _layout_log_summary(layout),
     )
     suffix = path.suffix.lower()
     if suffix == ".svg":
-        _render_stripboard_layout_svg(layout, circuit, path, scale, detail)
+        _render_stripboard_layout_svg(
+            layout,
+            circuit,
+            path,
+            scale,
+            detail,
+            component_labels,
+        )
     elif suffix == ".png":
-        _render_stripboard_layout_png(layout, circuit, path, scale, detail)
+        _render_stripboard_layout_png(
+            layout,
+            circuit,
+            path,
+            scale,
+            detail,
+            component_labels,
+        )
     else:
         raise ValueError("Stripboard layout output file must end in .svg or .png.")
     _logger.debug("Rendered stripboard layout file=%s", path)
@@ -2831,6 +2873,8 @@ def _build_output_paths(output_dir, stem, run_id):
     return StripboardBuildOutputs(
         top_svg=path_for("", ".svg"),
         top_png=path_for("", ".png"),
+        top_values_svg=path_for("_values", ".svg"),
+        top_values_png=path_for("_values", ".png"),
         bottom_svg=path_for("_bottom", ".svg"),
         bottom_png=path_for("_bottom", ".png"),
         debug_svg=path_for("_debug", ".svg"),
@@ -5450,7 +5494,18 @@ def _validate_layout_detail(detail):
     return detail
 
 
-def _render_stripboard_layout_svg(layout, circuit, path, scale, detail):
+def _validate_component_label_mode(component_labels):
+    component_labels = str(component_labels)
+    if component_labels not in {"refdes", "refdes_value"}:
+        raise ValueError(
+            "Stripboard component_labels must be 'refdes' or 'refdes_value'."
+        )
+    return component_labels
+
+
+def _render_stripboard_layout_svg(
+    layout, circuit, path, scale, detail, component_labels
+):
     scale = dsl._validate_render_scale(scale)
     width, height = dsl._stripboard_size(layout.board)
     pins = placed_component_pins(layout, circuit)
@@ -5478,9 +5533,9 @@ def _render_stripboard_layout_svg(layout, circuit, path, scale, detail):
     _append_svg_board(lines, layout.board)
     _append_svg_layout_cuts(lines, layout.cuts)
     _append_svg_layout_jumpers(lines, layout.jumpers)
-    overlays = _layout_component_overlays(layout, circuit, pins)
+    overlays = _layout_component_overlays(layout, circuit, pins, component_labels)
     _append_svg_layout_component_segments(lines, overlays)
-    if detail == "assembly":
+    if detail == "assembly" and component_labels == "refdes":
         _append_svg_layout_component_bodies(lines, overlays)
     if detail == "annotated":
         _append_svg_layout_blockers(lines, layout.blockers)
@@ -5488,7 +5543,7 @@ def _render_stripboard_layout_svg(layout, circuit, path, scale, detail):
     _append_svg_layout_connectors(lines, layout.connectors)
     _append_svg_layout_terminal_hole_labels(lines, circuit, pins)
     if detail == "assembly":
-        _append_svg_layout_component_body_labels(lines, overlays)
+        _append_svg_layout_component_body_labels(lines, overlays, component_labels)
     for label in labels:
         lines.append(dsl._svg_stripboard_overlay_label(label))
     lines.append("</svg>")
@@ -5625,27 +5680,40 @@ def _append_svg_layout_component_body(lines, overlay):
     lines.append(
         f'  <circle class="layout-component-body" '
         f'data-element="{dsl._svg_attr(overlay["refdes"])}" '
+        f'data-value="{dsl._svg_attr(overlay["value"])}" '
+        f'data-label="{dsl._svg_attr(overlay["label"])}" '
         f'data-footprint="{dsl._svg_attr(overlay["footprint_name"])}" '
         f'cx="{x:.3f}" cy="{y:.3f}" r="{radius:.3f}" '
         f'fill="{LAYOUT_COMPONENT_BODY_FILL}"/>'
     )
 
 
-def _append_svg_layout_component_body_labels(lines, overlays):
+def _append_svg_layout_component_body_labels(lines, overlays, component_labels):
     for overlay in overlays:
-        _append_svg_layout_component_body_label(lines, overlay)
+        _append_svg_layout_component_body_label(lines, overlay, component_labels)
 
 
-def _append_svg_layout_component_body_label(lines, overlay):
-    x, y = overlay["body_center"]
-    font_size = _layout_component_body_font_size(overlay)
+def _append_svg_layout_component_body_label(lines, overlay, component_labels):
+    x, y = _layout_component_body_label_position(overlay, component_labels)
+    font_size = _layout_component_body_font_size(overlay, component_labels)
+    style_attrs = ""
+    transform_attr = ""
+    if component_labels == "refdes_value":
+        style_attrs = (
+            ' stroke="#ffffff" stroke-width="0.060" paint-order="stroke" '
+            'stroke-linejoin="round"'
+        )
+        transform_attr = f' transform="rotate(-25 {x:.3f} {y:.3f})"'
     lines.append(
         f'  <text class="layout-component-body-label" '
         f'data-element="{dsl._svg_attr(overlay["refdes"])}" '
-        f'x="{x:.3f}" y="{y + 0.055:.3f}" '
+        f'data-value="{dsl._svg_attr(overlay["value"])}" '
+        f'data-label="{dsl._svg_attr(overlay["label"])}" '
+        f'x="{x:.3f}" y="{y:.3f}" '
         f'font-size="{font_size:.3f}" font-weight="800" text-anchor="middle" '
-        f'fill="{LAYOUT_COMPONENT_BODY_LABEL_FILL}">'
-        f'{dsl._svg_text(overlay["refdes"])}</text>'
+        f'fill="{_layout_component_body_label_fill(component_labels)}"'
+        f"{style_attrs}{transform_attr}>"
+        f'{dsl._svg_text(overlay["label"])}</text>'
     )
 
 
@@ -5715,7 +5783,9 @@ def _append_svg_layout_terminal_hole_labels(lines, circuit, pins):
         )
 
 
-def _render_stripboard_layout_png(layout, circuit, path, scale, detail):
+def _render_stripboard_layout_png(
+    layout, circuit, path, scale, detail, component_labels
+):
     scale = dsl._validate_render_scale(scale)
     try:
         from PIL import Image, ImageDraw
@@ -5777,7 +5847,7 @@ def _render_stripboard_layout_png(layout, circuit, path, scale, detail):
             )
 
     element_width = dsl._px_overlay_stroke(scale)
-    overlays = _layout_component_overlays(layout, circuit, pins)
+    overlays = _layout_component_overlays(layout, circuit, pins, component_labels)
     for overlay in overlays:
         for start, end in overlay["segments"]:
             draw.line(
@@ -5788,7 +5858,7 @@ def _render_stripboard_layout_png(layout, circuit, path, scale, detail):
                 fill=dsl.STRIPBOARD_OVERLAY_ELEMENT_STROKE,
                 width=element_width,
             )
-    if detail == "assembly":
+    if detail == "assembly" and component_labels == "refdes":
         for overlay in overlays:
             _draw_layout_component_body_png(draw, overlay, label_margin, scale)
 
@@ -5839,6 +5909,7 @@ def _render_stripboard_layout_png(layout, circuit, path, scale, detail):
                 overlay,
                 label_margin,
                 scale,
+                component_labels,
             )
 
     for label in labels:
@@ -5858,16 +5929,26 @@ def _draw_layout_component_body_png(draw, overlay, label_margin, scale):
     )
 
 
-def _draw_layout_component_body_label_png(image, overlay, label_margin, scale):
-    center = dsl._offset_point(overlay["body_center"], label_margin, 0)
+def _draw_layout_component_body_label_png(
+    image,
+    overlay,
+    label_margin,
+    scale,
+    component_labels,
+):
+    label_position = _layout_component_body_label_position(overlay, component_labels)
+    center = dsl._offset_point(label_position, label_margin, 0)
     dsl._draw_png_text_rotated(
         image,
         (center[0], center[1] + 0.005),
-        overlay["refdes"],
-        font=dsl._overlay_png_font(scale, _layout_component_body_font_size(overlay)),
+        overlay["label"],
+        font=dsl._overlay_png_font(
+            scale,
+            _layout_component_body_font_size(overlay, component_labels),
+        ),
         scale=scale,
-        fill=LAYOUT_COMPONENT_BODY_LABEL_FILL,
-        angle=0,
+        fill=_layout_component_body_label_fill(component_labels),
+        angle=-25 if component_labels == "refdes_value" else 0,
         anchor="center",
     )
 
@@ -5950,7 +6031,7 @@ def _placed_layout_labels(layout, circuit, pins, detail):
         )
     if detail != "annotated":
         return dsl._resolve_stripboard_overlay_label_collisions(tuple(labels))
-    for overlay in _layout_component_overlays(layout, circuit, pins):
+    for overlay in _layout_component_overlays(layout, circuit, pins, "refdes_value"):
         center = overlay["center"]
         labels.append(
             dsl._StripboardOverlayLabel(
@@ -6000,7 +6081,7 @@ def _layout_row_labels(layout, pins):
     return tuple(labels)
 
 
-def _layout_component_overlays(layout, circuit, pins):
+def _layout_component_overlays(layout, circuit, pins, component_labels="refdes"):
     pins_by_refdes = {}
     for pin in pins:
         pins_by_refdes.setdefault(pin.refdes, []).append(pin)
@@ -6030,7 +6111,8 @@ def _layout_component_overlays(layout, circuit, pins):
                 "refdes": component.refdes,
                 "kind": component.kind,
                 "footprint_name": placed_component.footprint_name,
-                "label": _component_label(component),
+                "value": "" if component.value is None else str(component.value),
+                "label": _component_label(component, component_labels),
                 "segments": segments,
                 "center": center,
                 "body_center": body_center,
@@ -6068,8 +6150,23 @@ def _layout_component_body_radius(overlay):
     return 0.300 if overlay["kind"] in {"bjt_npn", "pmos"} else 0.165
 
 
-def _layout_component_body_font_size(overlay):
-    return 0.210 if overlay["kind"] in {"bjt_npn", "pmos"} else 0.165
+def _layout_component_body_label_position(overlay, component_labels):
+    x, y = overlay["body_center"]
+    if component_labels == "refdes":
+        return x, y + 0.055
+    return x, y - _layout_component_body_radius(overlay) - 0.090
+
+
+def _layout_component_body_font_size(overlay, component_labels="refdes"):
+    if component_labels == "refdes":
+        return 0.210 if overlay["kind"] in {"bjt_npn", "pmos"} else 0.165
+    return 0.145
+
+
+def _layout_component_body_label_fill(component_labels):
+    if component_labels == "refdes":
+        return LAYOUT_COMPONENT_BODY_LABEL_FILL
+    return "#b91c1c"
 
 
 def _pin_terminal_label_visible(pin, components_by_refdes):
@@ -6081,12 +6178,10 @@ def _is_stripboard_physical_node_view(node_view):
     return node_view.kind not in dsl.STRIPBOARD_NON_PHYSICAL_NODE_KINDS
 
 
-def _component_label(component):
-    return (
-        component.refdes
-        if component.value is None
-        else f"{component.refdes} {component.value}"
-    )
+def _component_label(component, component_labels="refdes"):
+    if component_labels == "refdes" or component.value is None:
+        return component.refdes
+    return f"{component.refdes} {component.value}"
 
 
 def _terminal_label(terminal_name):
