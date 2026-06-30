@@ -257,13 +257,32 @@ def test_render_stripboard_layout_print_pdf_is_true_scale(tmp_path):
 
     render_stripboard_layout_print_pdf(layout, circuit, file=pdf_path)
 
-    assert pdf_path.read_bytes().startswith(b"%PDF")
-    geometry = physical._stripboard_print_geometry(layout, circuit)
+    pdf = pdf_path.read_bytes()
+    assert pdf.startswith(b"%PDF")
+    assert b"/Subtype /Image" not in pdf
+    sheet_svg, geometry = physical._stripboard_print_svg_sheet(
+        layout,
+        circuit,
+        detail="assembly",
+        component_labels="refdes",
+    )
     assert geometry["orientation"] == "portrait"
     assert geometry["board_width_mm"] == pytest.approx(8 * 2.54)
     assert geometry["board_height_mm"] == pytest.approx(4 * 2.54)
     assert geometry["pitch_mm"] == pytest.approx(2.54)
-    assert physical._print_font_size(0.145, 2.54) == pytest.approx(1.04, abs=0.01)
+    assert 'width="210mm" height="297mm"' in sheet_svg
+    assert 'class="stripboard-print-source"' in sheet_svg
+    assert "Print at 100% / actual size" in sheet_svg
+    assert "50 mm calibration" in sheet_svg
+    source_view_box = geometry["source_view_box"]
+    assert geometry["source_width_mm"] == pytest.approx(
+        source_view_box[2] * geometry["pitch_mm"]
+    )
+    assert geometry["source_height_mm"] == pytest.approx(
+        source_view_box[3] * geometry["pitch_mm"]
+    )
+    assert geometry["source_width_mm"] >= geometry["board_width_mm"]
+    assert geometry["source_height_mm"] >= geometry["board_height_mm"]
 
     large_layout = create_manual_stripboard_layout(
         circuit,
@@ -278,6 +297,29 @@ def test_render_stripboard_layout_print_pdf_is_true_scale(tmp_path):
             large_layout,
             circuit,
             file=tmp_path / "too_large.pdf",
+        )
+
+
+def test_render_stripboard_layout_print_pdf_requires_rsvg_convert(
+    tmp_path,
+    monkeypatch,
+):
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(8, 4),
+        placements={
+            "R1": ((0, 0), 0),
+            "R2": ((2, 0), 0),
+        },
+    )
+    monkeypatch.setattr(physical.shutil, "which", lambda _name: None)
+
+    with pytest.raises(RuntimeError, match="rsvg-convert is required"):
+        render_stripboard_layout_print_pdf(
+            layout,
+            circuit,
+            file=tmp_path / "manual_layout_a4.pdf",
         )
 
 
@@ -1134,6 +1176,8 @@ def test_write_stripboard_build_outputs_writes_build_artifacts(tmp_path):
     assert outputs.top_values_png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     assert outputs.top_a4_pdf.read_bytes().startswith(b"%PDF")
     assert outputs.top_values_a4_pdf.read_bytes().startswith(b"%PDF")
+    assert b"/Subtype /Image" not in outputs.top_a4_pdf.read_bytes()
+    assert b"/Subtype /Image" not in outputs.top_values_a4_pdf.read_bytes()
     assert 'class="bottom-strip-cut"' in outputs.bottom_svg.read_text(encoding="utf-8")
     assert 'class="debug-conductor-hole"' in outputs.debug_svg.read_text(
         encoding="utf-8"
@@ -1281,6 +1325,8 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(
     )
     assert outputs.top_a4_pdf.read_bytes().startswith(b"%PDF")
     assert outputs.top_values_a4_pdf.read_bytes().startswith(b"%PDF")
+    assert b"/Subtype /Image" not in outputs.top_a4_pdf.read_bytes()
+    assert b"/Subtype /Image" not in outputs.top_values_a4_pdf.read_bytes()
     assert (
         outputs.top_svg.read_text(encoding="utf-8").count(
             'class="layout-terminal-hole-label"'

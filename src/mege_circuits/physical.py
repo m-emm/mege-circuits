@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import shutil
+import subprocess
+import tempfile
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -5984,288 +5988,28 @@ def _render_stripboard_layout_print_pdf(
     detail,
     component_labels,
 ):
-    try:
-        import matplotlib.pyplot as plt
-        from matplotlib import patches
-    except ImportError as error:
-        raise RuntimeError(
-            "Matplotlib is required to render stripboard print PDF files."
-        ) from error
-
-    geometry = _stripboard_print_geometry(layout, circuit, detail=detail)
-    page_width = geometry["page_width_mm"]
-    page_height = geometry["page_height_mm"]
-    pitch_mm = geometry["pitch_mm"]
-    origin_x = geometry["origin_x_mm"]
-    origin_y = geometry["origin_y_mm"]
-
-    fig = plt.figure(figsize=(page_width / 25.4, page_height / 25.4))
-    ax = fig.add_axes((0, 0, 1, 1))
-    ax.set_xlim(0, page_width)
-    ax.set_ylim(page_height, 0)
-    ax.set_aspect("equal")
-    ax.axis("off")
-
-    def point(point_in_pitches):
-        return (
-            origin_x + point_in_pitches[0] * pitch_mm,
-            origin_y + point_in_pitches[1] * pitch_mm,
-        )
-
-    def rect(rect_in_pitches):
-        x, y, width, height = rect_in_pitches
-        return (
-            origin_x + x * pitch_mm,
-            origin_y + y * pitch_mm,
-            width * pitch_mm,
-            height * pitch_mm,
-        )
-
-    def linewidth(width_in_pitches):
-        return _mm_to_points(width_in_pitches * pitch_mm)
-
-    width, height = dsl._stripboard_size(layout.board)
-    board_x, board_y, board_width, board_height = rect((0, 0, width, height))
-    ax.add_patch(
-        patches.Rectangle(
-            (board_x, board_y),
-            board_width,
-            board_height,
-            facecolor=dsl.STRIPBOARD_BOARD_FILL,
-            edgecolor=dsl.STRIPBOARD_BOARD_STROKE,
-            linewidth=linewidth(dsl.STRIPBOARD_STROKE_WIDTH),
-            zorder=1,
-        )
+    sheet_svg, geometry = _stripboard_print_svg_sheet(
+        layout,
+        circuit,
+        detail=detail,
+        component_labels=component_labels,
     )
-    for row in range(layout.board.height_pitches):
-        x, y, strip_width, strip_height = rect(
-            dsl._stripboard_strip_rect(layout.board, row)
-        )
-        ax.add_patch(
-            patches.Rectangle(
-                (x, y),
-                strip_width,
-                strip_height,
-                facecolor=dsl.STRIPBOARD_STRIP_FILL,
-                edgecolor=dsl.STRIPBOARD_STRIP_STROKE,
-                linewidth=linewidth(dsl.STRIPBOARD_STROKE_WIDTH),
-                zorder=2,
-            )
-        )
-    for col, row, x, y in dsl._stripboard_holes(layout.board):
-        cx, cy = point((x, y))
-        ax.add_patch(
-            patches.Circle(
-                (cx, cy),
-                dsl.STRIPBOARD_HOLE_RADIUS * pitch_mm,
-                facecolor=dsl.STRIPBOARD_HOLE_FILL,
-                edgecolor=dsl.STRIPBOARD_HOLE_STROKE,
-                linewidth=linewidth(dsl.STRIPBOARD_STROKE_WIDTH),
-                zorder=3,
-            )
-        )
-
-    for cut in layout.cuts:
-        cx, cy = point(
-            (
-                dsl._stripboard_column_center(cut.col),
-                dsl._stripboard_row_center(cut.row),
-            )
-        )
-        ax.add_patch(
-            patches.Circle(
-                (cx, cy),
-                dsl.STRIPBOARD_CUT_RADIUS * pitch_mm,
-                facecolor="none",
-                edgecolor=dsl.STRIPBOARD_CUT_STROKE,
-                linewidth=linewidth(dsl.STRIPBOARD_CUT_STROKE_WIDTH),
-                zorder=6,
-            )
-        )
-        for x1, y1, x2, y2 in dsl._cut_cross_lines(
-            dsl._stripboard_column_center(cut.col),
-            dsl._stripboard_row_center(cut.row),
-            dsl.STRIPBOARD_CUT_RADIUS,
-        ):
-            start = point((x1, y1))
-            end = point((x2, y2))
-            ax.plot(
-                (start[0], end[0]),
-                (start[1], end[1]),
-                color=dsl.STRIPBOARD_CUT_STROKE,
-                linewidth=linewidth(dsl.STRIPBOARD_CUT_STROKE_WIDTH),
-                solid_capstyle="round",
-                zorder=7,
-            )
-
-    for jumper in layout.jumpers:
-        points = [point(p) for p in _jumper_display_points(jumper)]
-        ax.plot(
-            [p[0] for p in points],
-            [p[1] for p in points],
-            color=LAYOUT_JUMPER_STROKE,
-            linewidth=linewidth(LAYOUT_JUMPER_STROKE_WIDTH),
-            solid_capstyle="round",
-            solid_joinstyle="round",
-            zorder=8,
-        )
-        for hole in (jumper.start, jumper.end):
-            cx, cy = point(dsl._stripboard_hole_position(hole))
-            ax.add_patch(
-                patches.Circle(
-                    (cx, cy),
-                    LAYOUT_JUMPER_ENDPOINT_RADIUS * pitch_mm,
-                    facecolor=LAYOUT_JUMPER_ENDPOINT_FILL,
-                    edgecolor=LAYOUT_JUMPER_STROKE,
-                    linewidth=linewidth(LAYOUT_JUMPER_STROKE_WIDTH),
-                    zorder=9,
-                )
-            )
-
-    pins = placed_component_pins(layout, circuit)
-    overlays = _layout_component_overlays(layout, circuit, pins, component_labels)
-    for overlay in overlays:
-        for start, end in overlay["segments"]:
-            start_mm = point(start)
-            end_mm = point(end)
-            ax.plot(
-                (start_mm[0], end_mm[0]),
-                (start_mm[1], end_mm[1]),
-                color=dsl.STRIPBOARD_OVERLAY_ELEMENT_STROKE,
-                linewidth=linewidth(dsl.STRIPBOARD_OVERLAY_STROKE_WIDTH),
-                solid_capstyle="round",
-                zorder=10,
-            )
-    if detail == "assembly" and component_labels == "refdes":
-        for overlay in overlays:
-            cx, cy = point(overlay["body_center"])
-            ax.add_patch(
-                patches.Circle(
-                    (cx, cy),
-                    _layout_component_body_radius(overlay) * pitch_mm,
-                    facecolor=LAYOUT_COMPONENT_BODY_FILL,
-                    edgecolor="none",
-                    zorder=13,
-                )
-            )
-
-    if detail == "annotated":
-        for blocker in layout.blockers:
-            cx, cy = point(dsl._stripboard_hole_position((blocker.row, blocker.col)))
-            radius = dsl.STRIPBOARD_OVERLAY_TERMINAL_RADIUS * 0.95 * pitch_mm
-            ax.add_patch(
-                patches.Rectangle(
-                    (cx - radius, cy - radius),
-                    radius * 2,
-                    radius * 2,
-                    facecolor=dsl.STRIPBOARD_OVERLAY_ELEMENT_STROKE,
-                    edgecolor="none",
-                    alpha=0.42,
-                    zorder=11,
-                )
-            )
-
-    components_by_refdes = {
-        component.refdes: component for component in circuit.components
-    }
-    for pin in pins:
-        cx, cy = point(dsl._stripboard_hole_position(pin.hole))
-        ax.add_patch(
-            patches.Circle(
-                (cx, cy),
-                dsl.STRIPBOARD_OVERLAY_TERMINAL_RADIUS * pitch_mm,
-                facecolor=dsl.STRIPBOARD_OVERLAY_TERMINAL_FILL,
-                edgecolor="none",
-                zorder=12,
-            )
-        )
-        if _pin_terminal_label_visible(pin, components_by_refdes):
-            _print_text(
-                ax,
-                cx,
-                cy,
-                _terminal_label(pin.terminal_name),
-                size_pt=_print_font_size(0.145, pitch_mm),
-                color=LAYOUT_COMPONENT_BODY_LABEL_FILL,
-                weight="bold",
-                zorder=15,
-            )
-
-    for connector in layout.connectors:
-        cx, cy = point(dsl._stripboard_hole_position(connector.hole))
-        ax.add_patch(
-            patches.Circle(
-                (cx, cy),
-                LAYOUT_CONNECTOR_RADIUS * pitch_mm,
-                facecolor=LAYOUT_CONNECTOR_FILL,
-                edgecolor=LAYOUT_CONNECTOR_STROKE,
-                linewidth=linewidth(LAYOUT_JUMPER_STROKE_WIDTH),
-                zorder=12,
-            )
-        )
-
-    if detail == "assembly":
-        for overlay in overlays:
-            x, y = _layout_component_body_label_position(overlay, component_labels)
-            size_pt = _print_font_size(
-                _layout_component_body_font_size(overlay, component_labels),
-                pitch_mm,
-            )
-            _print_text(
-                ax,
-                *point((x, y)),
-                overlay["label"],
-                size_pt=size_pt,
-                color=_layout_component_body_label_fill(component_labels),
-                weight="bold",
-                rotation=-25 if component_labels == "refdes_value" else 0,
-                halo_color="#ffffff" if component_labels == "refdes_value" else None,
-                zorder=16,
-            )
-
-    labels = _placed_layout_labels(layout, circuit, pins, detail)
-    for label in labels:
-        _print_text(
-            ax,
-            *point((label.x, label.y)),
-            label.text,
-            size_pt=_print_font_size(label.font_size, pitch_mm),
-            color=dsl.STRIPBOARD_OVERLAY_TEXT_FILL,
-            weight=label.font_weight,
-            rotation=label.rotation_degrees,
-            anchor=label.text_anchor,
-            halo_color=dsl.STRIPBOARD_OVERLAY_TEXT_HALO,
-            zorder=17,
-        )
-
-    _draw_print_calibration_and_notes(
-        ax,
-        geometry,
-        board_x,
-        board_y + board_height,
-    )
-
-    fig.savefig(path, format="pdf")
-    plt.close(fig)
+    _convert_stripboard_print_svg_to_pdf(sheet_svg, path, geometry)
 
 
 def _stripboard_print_geometry(
     layout,
-    circuit=None,
     *,
-    detail="assembly",
+    source_view_box,
     page_size="a4",
 ):
     if str(page_size).lower() != "a4":
         raise ValueError("Only A4 stripboard print PDFs are supported.")
     pitch_mm = float(layout.board.pitch_mm)
+    min_x, min_y, source_width, source_height = source_view_box
     width, height = dsl._stripboard_size(layout.board)
-    pins = () if circuit is None else placed_component_pins(layout, circuit)
-    labels = (
-        () if circuit is None else _placed_layout_labels(layout, circuit, pins, detail)
-    )
-    label_margin = _layout_label_margin(labels) if labels else 0.0
-    content_width_mm = (label_margin + width) * pitch_mm
+    content_width_mm = source_width * pitch_mm
+    content_height_mm = source_height * pitch_mm
     board_width_mm = width * pitch_mm
     board_height_mm = height * pitch_mm
     print_margin_mm = 12.0
@@ -6279,7 +6023,7 @@ def _stripboard_print_geometry(
         available_height_mm = page_height_mm - 2 * print_margin_mm - notes_height_mm
         if (
             content_width_mm <= available_width_mm
-            and board_height_mm <= available_height_mm
+            and content_height_mm <= available_height_mm
         ):
             return {
                 "page_size": "a4",
@@ -6287,126 +6031,198 @@ def _stripboard_print_geometry(
                 "page_width_mm": page_width_mm,
                 "page_height_mm": page_height_mm,
                 "pitch_mm": pitch_mm,
-                "label_margin_pitches": label_margin,
-                "origin_x_mm": print_margin_mm + label_margin * pitch_mm,
+                "source_view_box": source_view_box,
+                "source_x_mm": print_margin_mm,
+                "source_y_mm": print_margin_mm,
+                "source_width_mm": content_width_mm,
+                "source_height_mm": content_height_mm,
+                "board_x_mm": print_margin_mm + (0.0 - min_x) * pitch_mm,
+                "board_y_mm": print_margin_mm + (0.0 - min_y) * pitch_mm,
                 "origin_y_mm": print_margin_mm,
                 "board_width_mm": board_width_mm,
                 "board_height_mm": board_height_mm,
                 "content_width_mm": content_width_mm,
-                "content_height_mm": board_height_mm,
+                "content_height_mm": content_height_mm,
                 "notes_height_mm": notes_height_mm,
                 "print_margin_mm": print_margin_mm,
             }
 
     raise ValueError(
         "Stripboard layout does not fit on A4 at 1:1 scale: "
-        f"content={content_width_mm:.1f}x{board_height_mm + notes_height_mm:.1f}mm "
+        f"content={content_width_mm:.1f}x{content_height_mm + notes_height_mm:.1f}mm "
         f"board={board_width_mm:.1f}x{board_height_mm:.1f}mm"
     )
 
 
-def _mm_to_points(value_mm):
-    return float(value_mm) * 72.0 / 25.4
-
-
-def _print_font_size(size_in_pitches, pitch_mm, *, minimum=0.0):
-    return max(float(minimum), _mm_to_points(float(size_in_pitches) * pitch_mm))
-
-
-def _print_text(
-    ax,
-    x,
-    y,
-    text,
-    *,
-    size_pt,
-    color,
-    weight="normal",
-    rotation=0.0,
-    anchor="center",
-    halo_color=None,
-    zorder=20,
-):
-    horizontal_alignment = {
-        "middle": "center",
-        "center": "center",
-        "start": "left",
-        "left": "left",
-        "end": "right",
-        "right": "right",
-    }.get(anchor, "center")
-    text_artist = ax.text(
-        x,
-        y,
-        str(text),
-        color=color,
-        fontsize=size_pt,
-        fontweight=weight,
-        ha=horizontal_alignment,
-        va="center",
-        rotation=rotation,
-        rotation_mode="anchor",
-        zorder=zorder,
+def _stripboard_print_svg_sheet(layout, circuit, *, detail, component_labels):
+    source_svg = _stripboard_print_source_svg(
+        layout,
+        circuit,
+        detail=detail,
+        component_labels=component_labels,
     )
-    if halo_color is not None:
-        from matplotlib import patheffects
-
-        text_artist.set_path_effects(
-            [
-                patheffects.withStroke(linewidth=2.0, foreground=halo_color),
-                patheffects.Normal(),
-            ]
-        )
-
-
-def _draw_print_calibration_and_notes(ax, geometry, board_x, board_bottom_y):
-    ruler_x = board_x
-    ruler_y = board_bottom_y + 8.0
-    ruler_width = 50.0
-    page_width = geometry["page_width_mm"]
-    if ruler_x + ruler_width > page_width - geometry["print_margin_mm"]:
-        ruler_width = 25.4
-    ax.plot(
-        (ruler_x, ruler_x + ruler_width),
-        (ruler_y, ruler_y),
-        color="#111827",
-        linewidth=1.0,
-        solid_capstyle="butt",
-        zorder=30,
-    )
-    for x in (ruler_x, ruler_x + ruler_width):
-        ax.plot(
-            (x, x),
-            (ruler_y - 1.5, ruler_y + 1.5),
-            color="#111827",
-            linewidth=1.0,
-            zorder=30,
-        )
-    _print_text(
-        ax,
-        ruler_x + ruler_width / 2.0,
-        ruler_y + 4.5,
-        f"{ruler_width:g} mm calibration",
-        size_pt=7.0,
-        color="#111827",
-        zorder=31,
-    )
+    source_view_box = _svg_view_box(source_svg)
+    geometry = _stripboard_print_geometry(layout, source_view_box=source_view_box)
+    source_body = _svg_inner_content(source_svg)
+    min_x, min_y, source_width, source_height = source_view_box
+    ruler_svg = _stripboard_print_calibration_svg(geometry)
     note = (
         "Print at 100% / actual size. "
         f"Pitch: {geometry['pitch_mm']:g} mm; "
         f"board: {geometry['board_width_mm']:.1f} x "
         f"{geometry['board_height_mm']:.1f} mm."
     )
-    _print_text(
-        ax,
-        ruler_x,
-        ruler_y + 11.0,
-        note,
-        size_pt=7.0,
-        color="#111827",
-        anchor="start",
-        zorder=31,
+    note_x = geometry["board_x_mm"]
+    note_y = _stripboard_print_note_y(geometry)
+    return (
+        "\n".join(
+            (
+                '<?xml version="1.0" encoding="UTF-8"?>',
+                (
+                    '<svg xmlns="http://www.w3.org/2000/svg" '
+                    f'width="{geometry["page_width_mm"]:g}mm" '
+                    f'height="{geometry["page_height_mm"]:g}mm" '
+                    f'viewBox="0 0 {geometry["page_width_mm"]:g} '
+                    f'{geometry["page_height_mm"]:g}">'
+                ),
+                "  <title>1:1 Stripboard Print Template</title>",
+                (
+                    '  <rect class="print-page" x="0" y="0" '
+                    f'width="{geometry["page_width_mm"]:g}" '
+                    f'height="{geometry["page_height_mm"]:g}" fill="#ffffff"/>'
+                ),
+                (
+                    '  <svg class="stripboard-print-source" '
+                    f'x="{geometry["source_x_mm"]:.4f}" '
+                    f'y="{geometry["source_y_mm"]:.4f}" '
+                    f'width="{geometry["source_width_mm"]:.4f}" '
+                    f'height="{geometry["source_height_mm"]:.4f}" '
+                    f'viewBox="{min_x:.4f} {min_y:.4f} '
+                    f'{source_width:.4f} {source_height:.4f}" '
+                    'overflow="visible" preserveAspectRatio="none">'
+                ),
+                source_body,
+                "  </svg>",
+                ruler_svg,
+                (
+                    f'  <text class="print-note" x="{note_x:.4f}" y="{note_y:.4f}" '
+                    'font-size="3.0" font-family="Arial, sans-serif" '
+                    'fill="#111827">'
+                    f"{dsl._svg_text(note)}</text>"
+                ),
+                "</svg>",
+            )
+        )
+        + "\n",
+        geometry,
     )
+
+
+def _stripboard_print_source_svg(layout, circuit, *, detail, component_labels):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        source_path = Path(tmp_dir) / "stripboard.svg"
+        _render_stripboard_layout_svg(
+            layout,
+            circuit,
+            source_path,
+            32,
+            detail,
+            component_labels,
+        )
+        return source_path.read_text(encoding="utf-8")
+
+
+def _svg_view_box(svg_text):
+    match = re.search(r'\bviewBox="([^"]+)"', svg_text)
+    if match is None:
+        raise ValueError("Printable stripboard SVG must contain a viewBox.")
+    parts = tuple(float(part) for part in match.group(1).split())
+    if len(parts) != 4:
+        raise ValueError("Printable stripboard SVG viewBox must have four numbers.")
+    return parts
+
+
+def _svg_inner_content(svg_text):
+    svg_text = re.sub(r"^\s*<\?xml[^>]*>\s*", "", svg_text, count=1)
+    start = svg_text.find(">")
+    end = svg_text.rfind("</svg>")
+    if start < 0 or end < 0 or end <= start:
+        raise ValueError("Printable stripboard SVG is malformed.")
+    return svg_text[start + 1 : end].strip()
+
+
+def _stripboard_print_calibration_svg(geometry):
+    ruler_x = geometry["board_x_mm"]
+    ruler_y = geometry["board_y_mm"] + geometry["board_height_mm"] + 8.0
+    ruler_width = 50.0
+    page_width = geometry["page_width_mm"]
+    if ruler_x + ruler_width > page_width - geometry["print_margin_mm"]:
+        ruler_width = 25.4
+    return "\n".join(
+        (
+            '  <g class="print-calibration" '
+            'stroke="#111827" fill="none" stroke-width="0.35">',
+            (
+                f'    <path d="M {ruler_x:.4f} {ruler_y:.4f} '
+                f"L {ruler_x + ruler_width:.4f} {ruler_y:.4f} "
+                f"M {ruler_x:.4f} {ruler_y - 1.6:.4f} "
+                f"L {ruler_x:.4f} {ruler_y + 1.6:.4f} "
+                f"M {ruler_x + ruler_width:.4f} {ruler_y - 1.6:.4f} "
+                f'L {ruler_x + ruler_width:.4f} {ruler_y + 1.6:.4f}"/>'
+            ),
+            "  </g>",
+            (
+                f'  <text class="print-calibration-label" '
+                f'x="{ruler_x + ruler_width / 2.0:.4f}" '
+                f'y="{ruler_y + 5.2:.4f}" '
+                'font-size="3.0" font-family="Arial, sans-serif" '
+                'text-anchor="middle" fill="#111827">'
+                f"{ruler_width:g} mm calibration</text>"
+            ),
+        )
+    )
+
+
+def _stripboard_print_note_y(geometry):
+    return geometry["board_y_mm"] + geometry["board_height_mm"] + 19.0
+
+
+def _convert_stripboard_print_svg_to_pdf(sheet_svg, path, geometry):
+    converter = shutil.which("rsvg-convert")
+    if converter is None:
+        raise RuntimeError(
+            "rsvg-convert is required to render vector stripboard print PDFs."
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        svg_path = tmp_dir / "stripboard_print.svg"
+        pdf_path = tmp_dir / "stripboard_print.pdf"
+        svg_path.write_text(sheet_svg, encoding="utf-8")
+        command = (
+            converter,
+            "-f",
+            "pdf",
+            "--page-width",
+            f'{geometry["page_width_mm"]:g}mm',
+            "--page-height",
+            f'{geometry["page_height_mm"]:g}mm',
+            "-o",
+            str(pdf_path),
+            str(svg_path),
+        )
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "rsvg-convert failed while rendering stripboard print PDF: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+        pdf_path.replace(path)
 
 
 def _draw_layout_component_body_png(draw, overlay, label_margin, scale):

@@ -283,6 +283,8 @@ def test_tb6600_integration_examples_render_stable_artifacts(tb6600_verified_pla
     assert stripboard_values_png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     assert stripboard_a4_pdf.read_bytes().startswith(b"%PDF")
     assert stripboard_values_a4_pdf.read_bytes().startswith(b"%PDF")
+    assert b"/Subtype /Image" not in stripboard_a4_pdf.read_bytes()
+    assert b"/Subtype /Image" not in stripboard_values_a4_pdf.read_bytes()
     assert schematic_svg.parent == stripboard_svg.parent
     assert schematic_svg.parent.name == "diagrams"
     assert schematic_svg.stem.startswith(f"{SCHEMATIC_ARTIFACT_STEM}__")
