@@ -22,6 +22,8 @@ from pathlib import Path
 import schemdraw
 import schemdraw.elements as elm
 
+from mege_circuits.pinout.svg import DEFAULT_COLOR_MAP as DEFAULT_KIND_COLOR_MAP
+
 TWO_TERMINAL_WIDTH = 0.8
 TWO_TERMINAL_HEIGHT = 2.0
 ZENER_HEIGHT = 1.25
@@ -65,6 +67,7 @@ STRIPBOARD_CUT_STROKE = "#000000"
 STRIPBOARD_CUT_RADIUS = 0.31
 STRIPBOARD_CUT_STROKE_WIDTH = 0.14
 STRIPBOARD_NON_PHYSICAL_NODE_KINDS = frozenset({"schematic_junction", "layout"})
+DEFAULT_NET_KIND = "default"
 
 
 class NodeType(Enum):
@@ -117,6 +120,11 @@ class Direction(Enum):
 @dataclass(frozen=True)
 class Net:
     name: str
+    kind: str = DEFAULT_NET_KIND
+
+    def __post_init__(self):
+        object.__setattr__(self, "name", str(self.name))
+        object.__setattr__(self, "kind", _normalize_net_kind(self.kind))
 
 
 @dataclass(frozen=True)
@@ -454,8 +462,8 @@ class Schema:
         ]
 
 
-def create_net(name):
-    return Net(name=str(name))
+def create_net(name, kind=DEFAULT_NET_KIND):
+    return Net(name=str(name), kind=kind)
 
 
 def create_stripboard(
@@ -582,6 +590,9 @@ def create_schema(node_views, elements, wires=None):
             schema_elements.append(item)
 
     nets = _validate_schema_items(schema_node_views, schema_elements, schema_wires)
+    nets_by_name = {net.name: net for net in nets}
+    for node_view in schema_node_views:
+        node_view.net = nets_by_name[node_view.net.name]
     return Schema(
         nets=nets,
         node_views=schema_node_views,
@@ -1507,12 +1518,13 @@ def modify_label_alignment(element, alignment):
     return modified
 
 
-def render_schemdraw(schema, file, show=False):
+def render_schemdraw(schema, file, show=False, kind_color_map=None):
     if Path(file).suffix.lower() != ".svg":
         schemdraw.use("matplotlib")
 
     node_views_by_name = _node_views_by_name(schema.node_views)
     node_points = _schema_node_points(schema, node_views_by_name)
+    net_color_map = _net_colors_by_name(schema, kind_color_map)
     rail_taps = {
         name: []
         for name, (_, node_view, _) in node_points.items()
@@ -1525,7 +1537,13 @@ def render_schemdraw(schema, file, show=False):
         for wire in schema.wires:
             start, end = _wire_endpoints(wire, node_points, node_views_by_name)
             _record_wire_rail_taps(wire, node_views_by_name, rail_taps, start, end)
-            _add_wire(drawing, start, end, direct=True)
+            _add_wire(
+                drawing,
+                start,
+                end,
+                direct=True,
+                color=net_color_map.get(wire.net_name),
+            )
 
         for element in schema.elements:
             for anchor_name, view_name in element.terminal_views.items():
@@ -1543,6 +1561,7 @@ def render_schemdraw(schema, file, show=False):
                     terminal,
                     node_point,
                     direct=_prefers_direct_terminal_wire(element),
+                    color=net_color_map.get(element.terminal_nets[anchor_name]),
                 )
 
         for element in schema.elements:
@@ -1557,22 +1576,33 @@ def render_schemdraw(schema, file, show=False):
 
         for node_name in sorted(node_points):
             point, node_view, terminal_count = node_points[node_name]
+            color = net_color_map.get(node_view.net.name)
             if _is_rail(node_view):
-                drawing.add(elm.Line().endpoints(*_rail_endpoints(node_view)))
+                rail = elm.Line().endpoints(*_rail_endpoints(node_view))
+                if color:
+                    rail = rail.color(color)
+                drawing.add(rail)
             if _should_render_node(node_view, terminal_count):
                 if node_view.node_type is Ground:
                     ground = elm.Ground().at(point)
+                    if color:
+                        ground = ground.color(color)
                     if node_view.label:
                         ground = ground.label(node_view.label, loc=node_view.label_loc)
                     drawing.add(ground)
                 else:
                     dot = elm.Dot().at(point)
+                    if color:
+                        dot = dot.color(color).fill(color)
                     if node_view.label:
                         dot = dot.label(node_view.label, loc=node_view.label_loc)
                     drawing.add(dot)
             if _is_rail(node_view):
                 for tap in _unique_points(rail_taps.get(node_name, [])):
-                    drawing.add(elm.Dot().at(tap))
+                    dot = elm.Dot().at(tap)
+                    if color:
+                        dot = dot.color(color).fill(color)
+                    drawing.add(dot)
 
     if Path(file).suffix == ".svg":
         _strip_trailing_whitespace(file)
@@ -1594,7 +1624,15 @@ def render_stripboard(stripboard, file, scale=32):
         raise ValueError("Stripboard output file must end in .svg or .png.")
 
 
-def render_stripboard_overlay(stripboard, assignment, schema, file, scale=32):
+def render_stripboard_overlay(
+    stripboard,
+    assignment,
+    schema,
+    file,
+    scale=32,
+    *,
+    kind_color_map=None,
+):
     """Render a diagnostic `StripboardNetAssignment` overlay.
 
     This renderer remains the supported view for the legacy projection path. It
@@ -1621,9 +1659,23 @@ def render_stripboard_overlay(stripboard, assignment, schema, file, scale=32):
     path = Path(file)
     suffix = path.suffix.lower()
     if suffix == ".svg":
-        _render_stripboard_overlay_svg(stripboard, assignment, schema, path, scale)
+        _render_stripboard_overlay_svg(
+            stripboard,
+            assignment,
+            schema,
+            path,
+            scale,
+            kind_color_map,
+        )
     elif suffix == ".png":
-        _render_stripboard_overlay_png(stripboard, assignment, schema, path, scale)
+        _render_stripboard_overlay_png(
+            stripboard,
+            assignment,
+            schema,
+            path,
+            scale,
+            kind_color_map,
+        )
     else:
         raise ValueError("Stripboard overlay output file must end in .svg or .png.")
 
@@ -1715,7 +1767,14 @@ def _render_stripboard_png(stripboard, path, scale):
     image.save(path)
 
 
-def _render_stripboard_overlay_svg(stripboard, assignment, schema, path, scale):
+def _render_stripboard_overlay_svg(
+    stripboard,
+    assignment,
+    schema,
+    path,
+    scale,
+    kind_color_map,
+):
     scale = _validate_render_scale(scale)
     width, height = _stripboard_size(stripboard)
     label_margin = STRIPBOARD_OVERLAY_NET_LABEL_MARGIN
@@ -1815,13 +1874,20 @@ def _render_stripboard_overlay_svg(stripboard, assignment, schema, path, scale):
 
     for marker in _stripboard_overlay_node_markers(schema, assignment):
         x, y = marker["position"]
+        color = kind_color(
+            marker["net_kind"],
+            kind_color_map,
+            fallback=STRIPBOARD_OVERLAY_NODE_FILL,
+        )
         lines.append(
             f'  <circle class="overlay-node" '
             f'data-net="{_svg_attr(marker["net_name"])}" '
             f'data-node="{_svg_attr(marker["node_name"])}" '
+            f'data-net-kind="{_svg_attr(marker["net_kind"])}" '
+            f'data-color="{_svg_attr(color)}" '
             f'cx="{x:.3f}" cy="{y:.3f}" '
             f'r="{STRIPBOARD_OVERLAY_NODE_RADIUS:.3f}" '
-            f'fill="{STRIPBOARD_OVERLAY_NODE_FILL}"/>'
+            f'fill="{color}"/>'
         )
 
     for label in overlay_labels:
@@ -1831,7 +1897,14 @@ def _render_stripboard_overlay_svg(stripboard, assignment, schema, path, scale):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _render_stripboard_overlay_png(stripboard, assignment, schema, path, scale):
+def _render_stripboard_overlay_png(
+    stripboard,
+    assignment,
+    schema,
+    path,
+    scale,
+    kind_color_map,
+):
     scale = _validate_render_scale(scale)
     try:
         from PIL import Image, ImageDraw
@@ -1891,7 +1964,11 @@ def _render_stripboard_overlay_png(stripboard, assignment, schema, path, scale):
             _offset_point(marker["position"], label_margin, 0),
             STRIPBOARD_OVERLAY_NODE_RADIUS,
             scale,
-            fill=STRIPBOARD_OVERLAY_NODE_FILL,
+            fill=kind_color(
+                marker["net_kind"],
+                kind_color_map,
+                fallback=STRIPBOARD_OVERLAY_NODE_FILL,
+            ),
         )
 
     for label in overlay_labels:
@@ -2357,6 +2434,7 @@ def _stripboard_overlay_node_markers(schema, assignment):
             {
                 "node_name": node_view.name,
                 "net_name": node_view.net.name,
+                "net_kind": node_view.net.kind,
                 "label": node_view.label,
                 "position": _stripboard_marker_position(
                     _stripboard_node_marker_key(node_view.name),
@@ -3615,6 +3693,60 @@ def _coerce_net(net, default_name):
     raise TypeError("net must be a Net, a net name string, or None.")
 
 
+def _normalize_net_kind(kind):
+    if kind is None:
+        return DEFAULT_NET_KIND
+    kind = str(kind).strip()
+    return kind or DEFAULT_NET_KIND
+
+
+def _merge_same_name_nets(existing, candidate):
+    if existing.kind == candidate.kind:
+        return existing
+    if existing.kind == DEFAULT_NET_KIND:
+        return candidate
+    if candidate.kind == DEFAULT_NET_KIND:
+        return existing
+    raise ValueError(
+        f"Net {existing.name!r} has conflicting kinds: "
+        f"{existing.kind!r} and {candidate.kind!r}."
+    )
+
+
+def _kind_color_map(kind_color_map=None):
+    color_map = dict(DEFAULT_KIND_COLOR_MAP)
+    if kind_color_map:
+        color_map.update(
+            {str(kind): str(color) for kind, color in kind_color_map.items()}
+        )
+    return color_map
+
+
+def kind_color(kind, kind_color_map=None, *, fallback=None):
+    """Return a display color for a non-default net kind.
+
+    The default kind intentionally returns ``fallback`` so old diagrams remain
+    visually unchanged until a net opts into a semantic kind.
+    """
+
+    kind = _normalize_net_kind(kind)
+    if kind == DEFAULT_NET_KIND:
+        return fallback
+    color_map = _kind_color_map(kind_color_map)
+    return color_map.get(kind, color_map[DEFAULT_NET_KIND])
+
+
+def net_color(net, kind_color_map=None, *, fallback=None):
+    return kind_color(net.kind, kind_color_map, fallback=fallback)
+
+
+def _net_colors_by_name(schema, kind_color_map=None):
+    return {
+        net.name: net_color(net, kind_color_map)
+        for net in _nets_by_name(schema.node_views).values()
+    }
+
+
 def _alignment_delta(part, to, alignment, axes=None, stack_gap=0):
     if axes is not None and alignment is not Alignment.CENTER:
         raise ValueError("Axis-restricted alignment is only supported for CENTER.")
@@ -3818,7 +3950,14 @@ def _node_views_by_name(node_views):
 def _nets_by_name(node_views):
     nets_by_name = {}
     for node_view in node_views:
-        nets_by_name.setdefault(node_view.net.name, node_view.net)
+        existing = nets_by_name.get(node_view.net.name)
+        if existing is None:
+            nets_by_name[node_view.net.name] = node_view.net
+            continue
+        nets_by_name[node_view.net.name] = _merge_same_name_nets(
+            existing,
+            node_view.net,
+        )
     return nets_by_name
 
 
@@ -3894,18 +4033,25 @@ def _rail_endpoints(node_view):
     return (x, y + length / 2.0), (x, y - length / 2.0)
 
 
-def _add_wire(drawing, start, end, direct=False):
+def _add_wire(drawing, start, end, direct=False, color=None):
     if _same_point(start, end):
         return
+
+    def add_line(line_start, line_end):
+        line = elm.Line().endpoints(line_start, line_end)
+        if color:
+            line = line.color(color)
+        drawing.add(line)
+
     if direct:
-        drawing.add(elm.Line().endpoints(start, end))
+        add_line(start, end)
         return
     corner = (start[0], end[1])
     if _same_point(start, corner) or _same_point(corner, end):
-        drawing.add(elm.Line().endpoints(start, end))
+        add_line(start, end)
         return
-    drawing.add(elm.Line().endpoints(start, corner))
-    drawing.add(elm.Line().endpoints(corner, end))
+    add_line(start, corner)
+    add_line(corner, end)
 
 
 def _prefers_direct_terminal_wire(element):

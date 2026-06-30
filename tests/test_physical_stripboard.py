@@ -40,11 +40,13 @@ from mege_circuits.simple import (
     footprint_for_component,
     placed_component_pins,
     plan_stripboard,
+    render_stripboard_bottom,
     render_stripboard_layout,
     render_stripboard_layout_print_pdf,
     score_stripboard_layout,
     stripboard_hints_from_schema,
     verify_stripboard_layout,
+    write_stripboard_build_checklist,
     write_stripboard_build_json,
     write_stripboard_build_outputs,
 )
@@ -441,13 +443,54 @@ def test_manual_layout_connectors_are_physical_pins_and_rendered(tmp_path):
     assert data["layout"]["connectors"] == [
         {
             "col": 2,
+            "color": "#2563eb",
             "kind": "nail",
             "label": "MID",
             "name": "J_mid",
+            "net_kind": "default",
             "net_name": "midpoint",
             "row": 3,
         }
     ]
+
+
+def test_stripboard_connectors_inherit_net_kind_color(tmp_path):
+    circuit = Circuit(
+        name="connector_color",
+        components=(),
+        nets=(create_net("vcc", kind="power"),),
+    )
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(3, 1),
+        connectors=(("J_vcc", "vcc", (0, 0), "VCC"),),
+    )
+    report = verify_stripboard_layout(layout, circuit)
+    assert report.ok, report.summary()
+
+    svg_path = tmp_path / "connector_color.svg"
+    bottom_path = tmp_path / "connector_color_bottom.svg"
+    data_path = tmp_path / "connector_color.json"
+    checklist_path = tmp_path / "connector_color.md"
+    render_stripboard_layout(layout, circuit, file=svg_path)
+    render_stripboard_bottom(layout, circuit, file=bottom_path)
+    write_stripboard_build_json(layout, circuit, report, file=data_path)
+    write_stripboard_build_checklist(layout, circuit, report, file=checklist_path)
+
+    svg = svg_path.read_text(encoding="utf-8")
+    bottom_svg = bottom_path.read_text(encoding="utf-8")
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+    checklist = checklist_path.read_text(encoding="utf-8")
+    assert 'class="layout-connector"' in svg
+    assert 'data-net-kind="power"' in svg
+    assert 'data-color="red"' in svg
+    assert 'fill="red"' in svg
+    assert 'class="bottom-connector"' in bottom_svg
+    assert 'data-net-kind="power"' in bottom_svg
+    assert data["circuit"]["net_kinds"] == {"vcc": "power"}
+    assert data["layout"]["connectors"][0]["net_kind"] == "power"
+    assert data["layout"]["connectors"][0]["color"] == "red"
+    assert "kind `power`, color `red`" in checklist
 
 
 def test_left_compaction_moves_components_as_rigid_units_and_trims_board():
@@ -1355,6 +1398,9 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(
     assert "## External Connectors" in outputs.checklist_md.read_text(encoding="utf-8")
     data = json.loads(outputs.data_json.read_text(encoding="utf-8"))
     top_svg = outputs.top_svg.read_text(encoding="utf-8")
+    assert data["circuit"]["net_kinds"]["v5"] == "power"
+    assert data["circuit"]["net_kinds"]["gnd"] == "ground"
+    assert data["circuit"]["net_kinds"]["step_pul_minus"] == "data"
     assert data["layout"]["board"]["width_pitches"] <= 14
     assert data["layout"]["board"]["height_pitches"] == 9
     assert len(data["layout"]["cuts"]) <= 4
@@ -1372,8 +1418,18 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(
         connector["name"] == "STEP_minus"
         and connector["label"] == "PUL-"
         and connector["net_name"] == "step_pul_minus"
+        and connector["net_kind"] == "data"
+        and connector["color"] == "gold"
         for connector in data["layout"]["connectors"]
     )
+    assert 'data-net="v5"' in top_svg
+    assert 'data-net-kind="power"' in top_svg
+    assert 'data-color="red"' in top_svg
+    assert 'data-net-kind="ground"' in top_svg
+    assert 'data-color="black"' in top_svg
+    assert 'data-net-kind="data"' in top_svg
+    assert 'data-color="gold"' in top_svg
+    assert 'fill="#2563eb"' not in top_svg
     assert not tuple(tmp_path.glob("*projection*"))
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert (

@@ -136,6 +136,10 @@ def export_netlist(circuit):
         "nets": tuple(
             net.name for net in sorted(circuit.nets, key=lambda item: item.name)
         ),
+        "net_kinds": {
+            net.name: net.kind
+            for net in sorted(circuit.nets, key=lambda item: item.name)
+        },
         "components": components,
     }
 
@@ -167,7 +171,7 @@ def _collect_unique_node_views(node_views, issues):
 
 
 def _schema_net_names(schema, issues):
-    net_names = set()
+    nets_by_name = {}
     for net in schema.nets:
         if not isinstance(net, Net):
             issues.append(
@@ -178,7 +182,18 @@ def _schema_net_names(schema, issues):
                 )
             )
             continue
-        if net.name in net_names:
+        existing = nets_by_name.get(net.name)
+        if existing is not None and existing.kind != net.kind:
+            issues.append(
+                ERCIssue(
+                    ERROR,
+                    "duplicate_net_kind_conflict",
+                    f"Duplicate net name {net.name!r} has conflicting kinds "
+                    f"{existing.kind!r} and {net.kind!r}.",
+                    subject=net.name,
+                )
+            )
+        elif existing is not None:
             issues.append(
                 ERCIssue(
                     ERROR,
@@ -187,8 +202,8 @@ def _schema_net_names(schema, issues):
                     subject=net.name,
                 )
             )
-        net_names.add(net.name)
-    return net_names
+        nets_by_name[net.name] = net
+    return set(nets_by_name)
 
 
 def _check_components(elements, schema_net_names, issues):

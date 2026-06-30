@@ -126,6 +126,7 @@ class PlacedConnector:
     hole: tuple[int, int]
     label: str | None = None
     kind: str = "nail"
+    net_kind: str = dsl.DEFAULT_NET_KIND
 
     def __post_init__(self):
         object.__setattr__(self, "name", str(self.name))
@@ -134,6 +135,7 @@ class PlacedConnector:
         if self.label is not None:
             object.__setattr__(self, "label", str(self.label))
         object.__setattr__(self, "kind", str(self.kind))
+        object.__setattr__(self, "net_kind", dsl._normalize_net_kind(self.net_kind))
 
     @property
     def row(self):
@@ -263,6 +265,7 @@ class StripboardRoutingHints:
     connector_holes: Mapping[str, tuple[int, int]] = field(default_factory=dict)
     connector_net_names: Mapping[str, str] = field(default_factory=dict)
     connector_labels: Mapping[str, str] = field(default_factory=dict)
+    connector_net_kinds: Mapping[str, str] = field(default_factory=dict)
     component_order: tuple[str, ...] = ()
     board_width_pitches: int | None = None
     board_height_pitches: int | None = None
@@ -328,6 +331,16 @@ class StripboardRoutingHints:
             "connector_labels",
             MappingProxyType(
                 {str(name): str(label) for name, label in self.connector_labels.items()}
+            ),
+        )
+        object.__setattr__(
+            self,
+            "connector_net_kinds",
+            MappingProxyType(
+                {
+                    str(name): dsl._normalize_net_kind(kind)
+                    for name, kind in self.connector_net_kinds.items()
+                }
             ),
         )
         object.__setattr__(
@@ -648,6 +661,7 @@ def stripboard_hints_from_schema(
     connector_holes = {}
     connector_net_names = {}
     connector_labels = {}
+    connector_net_kinds = {}
     for marker_key, column in assignment.marker_column_maps.items():
         if len(marker_key) == 2 and marker_key[0] == "node":
             _kind, node_name = marker_key
@@ -664,6 +678,7 @@ def stripboard_hints_from_schema(
             )
             connector_net_names[node_name] = node_view.net.name
             connector_labels[node_name] = node_view.label or node_name
+            connector_net_kinds[node_name] = node_view.net.kind
             continue
         if len(marker_key) != 3 or marker_key[0] != "terminal":
             continue
@@ -698,6 +713,7 @@ def stripboard_hints_from_schema(
         connector_holes=connector_holes,
         connector_net_names=connector_net_names,
         connector_labels=connector_labels,
+        connector_net_kinds=connector_net_kinds,
         component_order=component_order,
         board_width_pitches=assignment.stripboard.width_pitches,
         board_height_pitches=assignment.stripboard.height_pitches,
@@ -714,10 +730,12 @@ def stripboard_hints_from_schema(
     )
     _logger.debug(
         "Stripboard hint details net_rows=%s component_columns=%s "
-        "connector_holes=%s terminal_holes=%s component_order=%s",
+        "connector_holes=%s connector_net_kinds=%s terminal_holes=%s "
+        "component_order=%s",
         dict(hints.net_rows),
         dict(hints.component_columns),
         dict(hints.connector_holes),
+        dict(hints.connector_net_kinds),
         dict(hints.component_terminal_holes),
         hints.component_order,
     )
@@ -1587,13 +1605,7 @@ def _left_compaction_best_connector_move(layout, circuit, name, current_score):
         return None
 
     for col in range(0, connector.col):
-        moved = PlacedConnector(
-            name=connector.name,
-            net_name=connector.net_name,
-            hole=(connector.row, col),
-            label=connector.label,
-            kind=connector.kind,
-        )
+        moved = _connector_with_hole(connector, (connector.row, col))
         candidate_connectors = tuple(
             moved if candidate.name == name else candidate
             for candidate in layout.connectors
@@ -1977,13 +1989,7 @@ def _absorb_connector_only_jumper(layout, circuit, jumper_index):
                 continue
             candidate_connectors = tuple(
                 (
-                    PlacedConnector(
-                        name=candidate.name,
-                        net_name=candidate.net_name,
-                        hole=hole,
-                        label=candidate.label,
-                        kind=candidate.kind,
-                    )
+                    _connector_with_hole(candidate, hole)
                     if candidate.name == connector.name
                     else candidate
                 )
@@ -2095,13 +2101,7 @@ def _right_relax_connector(layout, circuit, name):
             continue
         candidate_connectors = tuple(
             (
-                PlacedConnector(
-                    name=candidate.name,
-                    net_name=candidate.net_name,
-                    hole=hole,
-                    label=candidate.label,
-                    kind=candidate.kind,
-                )
+                _connector_with_hole(candidate, hole)
                 if candidate.name == name
                 else candidate
             )
@@ -2340,13 +2340,7 @@ def _down_compaction_best_connector_move(layout, circuit, name):
             continue
         candidate_connectors = tuple(
             (
-                PlacedConnector(
-                    name=candidate.name,
-                    net_name=candidate.net_name,
-                    hole=hole,
-                    label=candidate.label,
-                    kind=candidate.kind,
-                )
+                _connector_with_hole(candidate, hole)
                 if candidate.name == name
                 else candidate
             )
@@ -2659,6 +2653,7 @@ def write_stripboard_build_outputs(
     report=None,
     run_id=None,
     scale=32,
+    kind_color_map=None,
 ):
     """Write top, bottom, debug, checklist, and JSON build artifacts."""
 
@@ -2688,14 +2683,27 @@ def write_stripboard_build_outputs(
         report.ok,
         _stripboard_density_metrics(layout, circuit).as_dict(),
     )
-    render_stripboard_layout(layout, circuit, file=paths.top_svg, scale=scale)
-    render_stripboard_layout(layout, circuit, file=paths.top_png, scale=scale)
+    render_stripboard_layout(
+        layout,
+        circuit,
+        file=paths.top_svg,
+        scale=scale,
+        kind_color_map=kind_color_map,
+    )
+    render_stripboard_layout(
+        layout,
+        circuit,
+        file=paths.top_png,
+        scale=scale,
+        kind_color_map=kind_color_map,
+    )
     render_stripboard_layout(
         layout,
         circuit,
         file=paths.top_values_svg,
         scale=scale,
         component_labels="refdes_value",
+        kind_color_map=kind_color_map,
     )
     render_stripboard_layout(
         layout,
@@ -2703,26 +2711,42 @@ def write_stripboard_build_outputs(
         file=paths.top_values_png,
         scale=scale,
         component_labels="refdes_value",
+        kind_color_map=kind_color_map,
     )
     render_stripboard_layout_print_pdf(
         layout,
         circuit,
         file=paths.top_a4_pdf,
+        kind_color_map=kind_color_map,
     )
     render_stripboard_layout_print_pdf(
         layout,
         circuit,
         file=paths.top_values_a4_pdf,
         component_labels="refdes_value",
+        kind_color_map=kind_color_map,
     )
-    render_stripboard_bottom(layout, circuit, file=paths.bottom_svg, scale=scale)
-    render_stripboard_bottom(layout, circuit, file=paths.bottom_png, scale=scale)
+    render_stripboard_bottom(
+        layout,
+        circuit,
+        file=paths.bottom_svg,
+        scale=scale,
+        kind_color_map=kind_color_map,
+    )
+    render_stripboard_bottom(
+        layout,
+        circuit,
+        file=paths.bottom_png,
+        scale=scale,
+        kind_color_map=kind_color_map,
+    )
     render_stripboard_debug(
         layout,
         circuit,
         report,
         file=paths.debug_svg,
         scale=scale,
+        kind_color_map=kind_color_map,
     )
     render_stripboard_debug(
         layout,
@@ -2730,6 +2754,7 @@ def write_stripboard_build_outputs(
         report,
         file=paths.debug_png,
         scale=scale,
+        kind_color_map=kind_color_map,
     )
     write_stripboard_build_checklist(layout, circuit, report, file=paths.checklist_md)
     write_stripboard_build_json(layout, circuit, report, file=paths.data_json)
@@ -2738,7 +2763,7 @@ def write_stripboard_build_outputs(
     return paths
 
 
-def render_stripboard_bottom(layout, circuit, file, scale=32):
+def render_stripboard_bottom(layout, circuit, file, scale=32, *, kind_color_map=None):
     """Render the solder-side copper and cut view for a physical layout."""
 
     _validate_renderable_layout(layout, circuit)
@@ -2751,15 +2776,23 @@ def render_stripboard_bottom(layout, circuit, file, scale=32):
     )
     suffix = path.suffix.lower()
     if suffix == ".svg":
-        _render_stripboard_bottom_svg(layout, circuit, path, scale)
+        _render_stripboard_bottom_svg(layout, circuit, path, scale, kind_color_map)
     elif suffix == ".png":
-        _render_stripboard_bottom_png(layout, circuit, path, scale)
+        _render_stripboard_bottom_png(layout, circuit, path, scale, kind_color_map)
     else:
         raise ValueError("Stripboard bottom output file must end in .svg or .png.")
     _logger.debug("Rendered stripboard bottom file=%s", path)
 
 
-def render_stripboard_debug(layout, circuit, report, file, scale=32):
+def render_stripboard_debug(
+    layout,
+    circuit,
+    report,
+    file,
+    scale=32,
+    *,
+    kind_color_map=None,
+):
     """Render a connectivity debug view from a verification report."""
 
     _validate_renderable_layout(layout, circuit)
@@ -2778,9 +2811,23 @@ def render_stripboard_debug(layout, circuit, report, file, scale=32):
     )
     suffix = path.suffix.lower()
     if suffix == ".svg":
-        _render_stripboard_debug_svg(layout, circuit, report, path, scale)
+        _render_stripboard_debug_svg(
+            layout,
+            circuit,
+            report,
+            path,
+            scale,
+            kind_color_map,
+        )
     elif suffix == ".png":
-        _render_stripboard_debug_png(layout, circuit, report, path, scale)
+        _render_stripboard_debug_png(
+            layout,
+            circuit,
+            report,
+            path,
+            scale,
+            kind_color_map,
+        )
     else:
         raise ValueError("Stripboard debug output file must end in .svg or .png.")
     _logger.debug("Rendered stripboard debug file=%s", path)
@@ -2823,6 +2870,7 @@ def render_stripboard_layout(
     *,
     detail="assembly",
     component_labels="refdes",
+    kind_color_map=None,
 ):
     """Render a manual physical stripboard layout as SVG or PNG."""
 
@@ -2855,6 +2903,7 @@ def render_stripboard_layout(
             scale,
             detail,
             component_labels,
+            kind_color_map,
         )
     elif suffix == ".png":
         _render_stripboard_layout_png(
@@ -2864,6 +2913,7 @@ def render_stripboard_layout(
             scale,
             detail,
             component_labels,
+            kind_color_map,
         )
     else:
         raise ValueError("Stripboard layout output file must end in .svg or .png.")
@@ -2877,6 +2927,7 @@ def render_stripboard_layout_print_pdf(
     *,
     detail="assembly",
     component_labels="refdes",
+    kind_color_map=None,
 ):
     """Render an A4 printable 1:1 stripboard placement PDF."""
 
@@ -2908,6 +2959,7 @@ def render_stripboard_layout_print_pdf(
         path,
         detail,
         component_labels,
+        kind_color_map,
     )
     _logger.debug("Rendered stripboard print PDF file=%s", path)
 
@@ -2947,7 +2999,7 @@ def _build_output_paths(output_dir, stem, run_id):
     )
 
 
-def _render_stripboard_bottom_svg(layout, circuit, path, scale):
+def _render_stripboard_bottom_svg(layout, circuit, path, scale, kind_color_map):
     scale = dsl._validate_render_scale(scale)
     width, height = dsl._stripboard_size(layout.board)
     width_px = width * scale
@@ -2972,7 +3024,7 @@ def _render_stripboard_bottom_svg(layout, circuit, path, scale):
     _append_svg_bottom_board(lines, layout.board)
     _append_svg_bottom_cuts(lines, layout)
     _append_svg_bottom_pins(lines, layout, pins)
-    _append_svg_bottom_connectors(lines, layout)
+    _append_svg_bottom_connectors(lines, layout, circuit, kind_color_map)
     lines.append("</svg>")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -3032,23 +3084,28 @@ def _append_svg_bottom_pins(lines, layout, pins):
         )
 
 
-def _append_svg_bottom_connectors(lines, layout):
+def _append_svg_bottom_connectors(lines, layout, circuit, kind_color_map):
     for connector in layout.connectors:
         x, y = _bottom_hole_position(layout.board, connector.hole)
+        net_kind = _connector_net_kind(connector, circuit)
+        color = _connector_color(connector, circuit, kind_color_map)
         lines.append(
             f'  <circle class="bottom-connector" '
             f'data-net="{dsl._svg_attr(connector.net_name)}" '
             f'data-connector="{dsl._svg_attr(connector.name)}" '
+            f'data-kind="{dsl._svg_attr(connector.kind)}" '
+            f'data-net-kind="{dsl._svg_attr(net_kind)}" '
+            f'data-color="{dsl._svg_attr(color)}" '
             f'data-row="{connector.row}" data-col="{connector.col}" '
             f'cx="{x:.3f}" cy="{y:.3f}" '
             f'r="{LAYOUT_CONNECTOR_RADIUS:.3f}" '
-            f'fill="{LAYOUT_CONNECTOR_FILL}" '
+            f'fill="{color}" '
             f'stroke="{LAYOUT_CONNECTOR_STROKE}" '
             f'stroke-width="{LAYOUT_JUMPER_STROKE_WIDTH:.3f}"/>'
         )
 
 
-def _render_stripboard_bottom_png(layout, circuit, path, scale):
+def _render_stripboard_bottom_png(layout, circuit, path, scale, kind_color_map):
     scale = dsl._validate_render_scale(scale)
     try:
         from PIL import Image, ImageDraw
@@ -3081,6 +3138,7 @@ def _render_stripboard_bottom_png(layout, circuit, path, scale):
             draw,
             _bottom_hole_position(layout.board, connector.hole),
             scale,
+            fill=_connector_color(connector, circuit, kind_color_map),
         )
 
     image.save(path)
@@ -3103,7 +3161,7 @@ def _draw_bottom_cut_png(draw, board, cut, scale):
         )
 
 
-def _render_stripboard_debug_svg(layout, circuit, report, path, scale):
+def _render_stripboard_debug_svg(layout, circuit, report, path, scale, kind_color_map):
     scale = dsl._validate_render_scale(scale)
     width, height = dsl._stripboard_size(layout.board)
     width_px = width * scale
@@ -3128,7 +3186,7 @@ def _render_stripboard_debug_svg(layout, circuit, report, path, scale):
     _append_svg_debug_conductors(lines, report.physical_netlist)
     _append_svg_debug_jumpers(lines, layout)
     _append_svg_layout_pins(lines, placed_component_pins(layout, circuit))
-    _append_svg_layout_connectors(lines, layout.connectors)
+    _append_svg_layout_connectors(lines, layout.connectors, circuit, kind_color_map)
     lines.append("</svg>")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -3204,7 +3262,14 @@ def _append_svg_debug_jumpers(lines, layout):
         )
 
 
-def _render_stripboard_debug_png(layout, circuit, report, path, scale):
+def _render_stripboard_debug_png(
+    layout,
+    circuit,
+    report,
+    path,
+    scale,
+    kind_color_map,
+):
     scale = dsl._validate_render_scale(scale)
     try:
         from PIL import Image, ImageDraw
@@ -3262,7 +3327,14 @@ def _render_stripboard_debug_png(layout, circuit, report, path, scale):
             fill=dsl.STRIPBOARD_OVERLAY_TERMINAL_FILL,
         )
     for connector in layout.connectors:
-        _draw_layout_connector_png(draw, connector, 0, scale)
+        _draw_layout_connector_png(
+            draw,
+            connector,
+            0,
+            scale,
+            circuit,
+            kind_color_map,
+        )
 
     image.save(path)
 
@@ -3361,10 +3433,13 @@ def _stripboard_build_checklist_lines(layout, circuit, report):
     lines.extend(["", "## External Connectors"])
     for connector in layout.connectors:
         label = "" if connector.label is None else f" `{connector.label}`"
+        net_kind = _connector_net_kind(connector, circuit)
+        color = _connector_color(connector, circuit)
         lines.append(
             "- [ ] "
             f"{connector.name}{label}: net `{connector.net_name}`, "
-            f"row {connector.row}, col {connector.col}"
+            f"kind `{net_kind}`, color `{color}`, row {connector.row}, "
+            f"col {connector.col}"
         )
 
     lines.extend(["", "## Strip Cuts"])
@@ -3419,6 +3494,8 @@ def _stripboard_build_json_data(layout, circuit, report):
                     "name": connector.name,
                     "label": connector.label,
                     "kind": connector.kind,
+                    "net_kind": _connector_net_kind(connector, circuit),
+                    "color": _connector_color(connector, circuit),
                     "net_name": connector.net_name,
                     "row": connector.row,
                     "col": connector.col,
@@ -3584,6 +3661,10 @@ def _routing_connectors_from_hints(hints, circuit, board):
                 net_name=net_name,
                 hole=hole,
                 label=hints.connector_labels.get(name, name),
+                net_kind=hints.connector_net_kinds.get(
+                    name,
+                    _circuit_net_kind(circuit, net_name),
+                ),
             )
         )
     return tuple(sorted(connectors, key=lambda connector: connector.name))
@@ -4932,6 +5013,39 @@ def _connector_pin(connector):
     )
 
 
+def _connector_with_hole(connector, hole):
+    return PlacedConnector(
+        name=connector.name,
+        net_name=connector.net_name,
+        hole=hole,
+        label=connector.label,
+        kind=connector.kind,
+        net_kind=connector.net_kind,
+    )
+
+
+def _circuit_net_kind(circuit, net_name):
+    for net in circuit.nets:
+        if net.name == net_name:
+            return net.kind
+    return dsl.DEFAULT_NET_KIND
+
+
+def _connector_net_kind(connector, circuit):
+    if connector.net_kind != dsl.DEFAULT_NET_KIND:
+        return connector.net_kind
+    return _circuit_net_kind(circuit, connector.net_name)
+
+
+def _connector_color(connector, circuit, kind_color_map=None):
+    net_kind = _connector_net_kind(connector, circuit)
+    return dsl.kind_color(
+        net_kind,
+        kind_color_map,
+        fallback=LAYOUT_CONNECTOR_FILL,
+    )
+
+
 def _check_component_footprint_assignment(component, footprint, issues):
     if component.kind not in footprint.component_kinds:
         issues.append(
@@ -5396,13 +5510,14 @@ def _normalize_connectors(connectors):
         if isinstance(connector, PlacedConnector):
             normalized.append(connector)
             continue
-        if not isinstance(connector, tuple) or len(connector) not in (3, 4, 5):
+        if not isinstance(connector, tuple) or len(connector) not in (3, 4, 5, 6):
             raise TypeError(
                 "Connectors must be PlacedConnector objects or "
-                "(name, net_name, hole[, label[, kind]])."
+                "(name, net_name, hole[, label[, kind[, net_kind]]])."
             )
         label = connector[3] if len(connector) >= 4 else None
         kind = connector[4] if len(connector) >= 5 else "nail"
+        net_kind = connector[5] if len(connector) >= 6 else dsl.DEFAULT_NET_KIND
         normalized.append(
             PlacedConnector(
                 name=connector[0],
@@ -5410,6 +5525,7 @@ def _normalize_connectors(connectors):
                 hole=connector[2],
                 label=label,
                 kind=kind,
+                net_kind=net_kind,
             )
         )
     return tuple(sorted(normalized, key=lambda item: item.name))
@@ -5567,7 +5683,7 @@ def _validate_component_label_mode(component_labels):
 
 
 def _render_stripboard_layout_svg(
-    layout, circuit, path, scale, detail, component_labels
+    layout, circuit, path, scale, detail, component_labels, kind_color_map
 ):
     scale = dsl._validate_render_scale(scale)
     width, height = dsl._stripboard_size(layout.board)
@@ -5603,7 +5719,7 @@ def _render_stripboard_layout_svg(
     if detail == "annotated":
         _append_svg_layout_blockers(lines, layout.blockers)
     _append_svg_layout_pins(lines, pins)
-    _append_svg_layout_connectors(lines, layout.connectors)
+    _append_svg_layout_connectors(lines, layout.connectors, circuit, kind_color_map)
     _append_svg_layout_terminal_hole_labels(lines, circuit, pins)
     if detail == "assembly":
         _append_svg_layout_component_body_labels(lines, overlays, component_labels)
@@ -5808,18 +5924,22 @@ def _append_svg_layout_pins(lines, pins):
         )
 
 
-def _append_svg_layout_connectors(lines, connectors):
+def _append_svg_layout_connectors(lines, connectors, circuit, kind_color_map):
     for connector in connectors:
         x, y = dsl._stripboard_hole_position(connector.hole)
+        net_kind = _connector_net_kind(connector, circuit)
+        color = _connector_color(connector, circuit, kind_color_map)
         lines.append(
             f'  <circle class="layout-connector" '
             f'data-net="{dsl._svg_attr(connector.net_name)}" '
             f'data-connector="{dsl._svg_attr(connector.name)}" '
             f'data-kind="{dsl._svg_attr(connector.kind)}" '
+            f'data-net-kind="{dsl._svg_attr(net_kind)}" '
+            f'data-color="{dsl._svg_attr(color)}" '
             f'data-row="{connector.row}" data-col="{connector.col}" '
             f'cx="{x:.3f}" cy="{y:.3f}" '
             f'r="{LAYOUT_CONNECTOR_RADIUS:.3f}" '
-            f'fill="{LAYOUT_CONNECTOR_FILL}" '
+            f'fill="{color}" '
             f'stroke="{LAYOUT_CONNECTOR_STROKE}" '
             f'stroke-width="{LAYOUT_JUMPER_STROKE_WIDTH:.3f}"/>'
         )
@@ -5847,7 +5967,7 @@ def _append_svg_layout_terminal_hole_labels(lines, circuit, pins):
 
 
 def _render_stripboard_layout_png(
-    layout, circuit, path, scale, detail, component_labels
+    layout, circuit, path, scale, detail, component_labels, kind_color_map
 ):
     scale = dsl._validate_render_scale(scale)
     try:
@@ -5963,7 +6083,14 @@ def _render_stripboard_layout_png(
             _draw_layout_terminal_hole_label_png(image, pin, label_margin, scale)
 
     for connector in layout.connectors:
-        _draw_layout_connector_png(draw, connector, label_margin, scale)
+        _draw_layout_connector_png(
+            draw,
+            connector,
+            label_margin,
+            scale,
+            circuit,
+            kind_color_map,
+        )
 
     if detail == "assembly":
         for overlay in overlays:
@@ -5987,12 +6114,14 @@ def _render_stripboard_layout_print_pdf(
     path,
     detail,
     component_labels,
+    kind_color_map,
 ):
     sheet_svg, geometry = _stripboard_print_svg_sheet(
         layout,
         circuit,
         detail=detail,
         component_labels=component_labels,
+        kind_color_map=kind_color_map,
     )
     _convert_stripboard_print_svg_to_pdf(sheet_svg, path, geometry)
 
@@ -6054,12 +6183,20 @@ def _stripboard_print_geometry(
     )
 
 
-def _stripboard_print_svg_sheet(layout, circuit, *, detail, component_labels):
+def _stripboard_print_svg_sheet(
+    layout,
+    circuit,
+    *,
+    detail,
+    component_labels,
+    kind_color_map=None,
+):
     source_svg = _stripboard_print_source_svg(
         layout,
         circuit,
         detail=detail,
         component_labels=component_labels,
+        kind_color_map=kind_color_map,
     )
     source_view_box = _svg_view_box(source_svg)
     geometry = _stripboard_print_geometry(layout, source_view_box=source_view_box)
@@ -6118,7 +6255,14 @@ def _stripboard_print_svg_sheet(layout, circuit, *, detail, component_labels):
     )
 
 
-def _stripboard_print_source_svg(layout, circuit, *, detail, component_labels):
+def _stripboard_print_source_svg(
+    layout,
+    circuit,
+    *,
+    detail,
+    component_labels,
+    kind_color_map=None,
+):
     with tempfile.TemporaryDirectory() as tmp_dir:
         source_path = Path(tmp_dir) / "stripboard.svg"
         _render_stripboard_layout_svg(
@@ -6128,6 +6272,7 @@ def _stripboard_print_source_svg(layout, circuit, *, detail, component_labels):
             32,
             detail,
             component_labels,
+            kind_color_map,
         )
         return source_path.read_text(encoding="utf-8")
 
@@ -6274,16 +6419,28 @@ def _draw_layout_terminal_hole_label_png(image, pin, label_margin, scale):
     )
 
 
-def _draw_layout_connector_png(draw, connector, label_margin, scale):
+def _draw_layout_connector_png(
+    draw,
+    connector,
+    label_margin,
+    scale,
+    circuit,
+    kind_color_map=None,
+):
     center = dsl._offset_point(
         dsl._stripboard_hole_position(connector.hole),
         label_margin,
         0,
     )
-    _draw_layout_connector_png_at(draw, center, scale)
+    _draw_layout_connector_png_at(
+        draw,
+        center,
+        scale,
+        fill=_connector_color(connector, circuit, kind_color_map),
+    )
 
 
-def _draw_layout_connector_png_at(draw, center, scale):
+def _draw_layout_connector_png_at(draw, center, scale, *, fill=LAYOUT_CONNECTOR_FILL):
     stroke_width = max(1, int(round(LAYOUT_JUMPER_STROKE_WIDTH * scale)))
     draw.ellipse(
         dsl._px_rect(
@@ -6293,7 +6450,7 @@ def _draw_layout_connector_png_at(draw, center, scale):
             LAYOUT_CONNECTOR_RADIUS * 2,
             scale,
         ),
-        fill=LAYOUT_CONNECTOR_FILL,
+        fill=fill,
         outline=LAYOUT_CONNECTOR_STROKE,
         width=stroke_width,
     )

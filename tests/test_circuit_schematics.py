@@ -62,6 +62,7 @@ def test_voltage_divider_schema_has_expected_shape():
 
     assert [node.name for node in schema.node_views] == ["vcc", "midpoint", "gnd"]
     assert [net.name for net in schema.nets] == ["vcc", "midpoint", "gnd"]
+    assert [net.kind for net in schema.nets] == ["default", "default", "default"]
     assert [element.name for element in schema.elements] == ["R1", "R2"]
     assert schema.elements[0].terminal_views["start"] == "vcc"
     assert schema.elements[0].terminal_views["end"] == "midpoint"
@@ -89,6 +90,7 @@ def test_circuit_from_schema_exports_voltage_divider_netlist():
     assert netlist == {
         "name": "voltage_divider",
         "nets": ("gnd", "midpoint", "vcc"),
+        "net_kinds": {"gnd": "default", "midpoint": "default", "vcc": "default"},
         "components": {
             "R1": {
                 "kind": "resistor",
@@ -102,6 +104,26 @@ def test_circuit_from_schema_exports_voltage_divider_netlist():
             },
         },
     }
+
+
+def test_schema_net_kinds_merge_default_and_reject_conflicts():
+    power = create_net("vcc", kind="power")
+    a = create_node(Dot, "a", net=power)
+    b = translate(2, 0)(create_node(Dot, "b", net="vcc"))
+
+    schema = create_schema([a, b], [create_wire(a, b)])
+
+    assert schema.nets == [create_net("vcc", kind="power")]
+    assert {node.net.kind for node in schema.node_views} == {"power"}
+
+    with pytest.raises(ValueError, match="conflicting kinds"):
+        create_schema(
+            [
+                create_node(Dot, "left", net=create_net("shared", kind="power")),
+                create_node(Dot, "right", net=create_net("shared", kind="ground")),
+            ],
+            [],
+        )
 
 
 def test_semantic_netlist_ignores_drawing_positions():
@@ -250,6 +272,20 @@ def test_render_schemdraw_writes_svg(tmp_path):
 
     assert outfile.exists()
     assert "<svg" in outfile.read_text(encoding="utf-8")
+
+
+def test_render_schemdraw_colors_wires_and_dots_by_net_kind(tmp_path):
+    power = create_net("vcc", kind="power")
+    left = create_node(Dot, "left", net=power, label="VCC")
+    right = translate(2, 0)(create_node(Dot, "right", net=power, label="OUT"))
+    schema = create_schema([left, right], [create_wire(left, right)])
+    outfile = tmp_path / "colored.svg"
+
+    render_schemdraw(schema, file=outfile)
+
+    svg = outfile.read_text(encoding="utf-8")
+    assert "stroke: #ff0000" in svg
+    assert "fill: #ff0000" in svg
 
 
 def test_render_schemdraw_writes_png(tmp_path):

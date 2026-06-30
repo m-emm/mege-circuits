@@ -52,23 +52,21 @@ REFDES = {
 
 
 def create_tb6600_nets():
-    return {
-        name: create_net(name)
-        for name in [
-            "v5",
-            "gnd",
-            "v24",
-            "step_pul_minus",
-            "step_base",
-            "step_gpio",
-            "dir_minus",
-            "dir_base",
-            "dir_gpio",
-            "ena_plus",
-            "ena_base",
-            "ena_gpio",
-        ]
+    net_kinds = {
+        "v5": "power",
+        "v24": "power",
+        "gnd": "ground",
+        "step_pul_minus": "data",
+        "step_base": "data",
+        "step_gpio": "data",
+        "dir_minus": "data",
+        "dir_base": "data",
+        "dir_gpio": "data",
+        "ena_plus": "data",
+        "ena_base": "data",
+        "ena_gpio": "data",
     }
+    return {name: create_net(name, kind=kind) for name, kind in net_kinds.items()}
 
 
 def create_rails(nets):
