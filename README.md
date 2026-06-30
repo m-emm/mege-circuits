@@ -89,6 +89,7 @@ directory are symlinks to the newest generated artifacts.
 
 - [DSL guide](docs/dsl-guide.md)
 - [Alignment notes](docs/alignment-based-schemdraw.md)
+- [Pinout diagrams](docs/pinout.md)
 - [Stripboard planning blueprint](docs/blueprint.md)
 - [PyPI publishing](docs/pypi-publishing.md)
 

@@ -1,0 +1,119 @@
+basename: demo_pico_w_btt_tmc2226_single_driver
+
+metadata:
+  version_label: "Demo Pico W + BTT TMC2226 single driver"
+  notes: |
+    Orientation: board top view, USB side at top for Pico W.
+    TMC2226 pin names follow BIGTREETECH EZ2226 interface labels (J1/J2).
+    Motor supply (VM) is typically external and is not tied to Pico power here.
+
+color_map:
+  power: "#ff0000"     # red: VCC/5V
+  lv_power: "#9ca3af"  # white wire shown as gray for visibility (3.3V)
+  ground: "#000000"    # black: GND
+  clock: "#0057d8"     # blue: clock-like signals
+  data: "#ffd400"      # yellow: data/control signals
+  default: "#808080"
+
+pin_sets:
+  - prefix: PICO_
+    origin: [0, 20]
+    direction: down
+    pins:
+      - GPIO_0
+      - GPIO_1
+      - GND_03
+      - GPIO_2
+      - GPIO_3
+      - GPIO_4
+      - GPIO_5
+      - GND_08
+      - GPIO_6
+      - GPIO_7
+      - GPIO_8
+      - GPIO_9
+      - GND_13
+      - GPIO_10
+      - GPIO_11
+      - GPIO_12
+      - GPIO_13
+      - GND_18
+      - GPIO_14
+      - GPIO_15
+  - prefix: PICO_
+    origin: [8, 20]
+    direction: down
+    pins:
+      - VBUS_40
+      - VSYS_39
+      - GND_38
+      - THREEV3_EN_37
+      - THREEV3_OUT_36
+      - ADC_VREF_35
+      - GPIO_28_ADC2_34
+      - AGND_33
+      - GPIO_27_ADC1_32
+      - GPIO_26_ADC0_31
+      - RUN_30
+      - GPIO_22_29
+      - GND_28
+      - GPIO_21_27
+      - GPIO_20_26
+      - GPIO_19_25
+      - GPIO_18_24
+      - GND_23
+      - GPIO_17_22
+      - GPIO_16_21
+  - prefix: TMC_J1_
+    origin: [20, 18]
+    direction: down
+    pins:
+      - EN_1
+      - SDI_CFG1_2
+      - SCK_CFG2_3
+      - CSN_CFG3_4
+      - SDO_CFG0_5
+      - DIAG_6
+      - STEP_7
+      - DIR_8
+  - prefix: TMC_J2_
+    origin: [24, 18]
+    direction: down
+    pins:
+      - VM_1
+      - GND_MOTOR_2
+      - B2_3
+      - B1_4
+      - A1_5
+      - A2_6
+      - VIO_7
+      - GND_LOGIC_8
+
+wires:
+  - from: PICO_GPIO_2
+    to: TMC_J1_STEP_7
+    type: clock
+  - from: PICO_GPIO_3
+    to: TMC_J1_DIR_8
+    type: data
+  - from: PICO_GPIO_4
+    to: TMC_J1_EN_1
+    type: data
+  - from: PICO_GPIO_5
+    to: TMC_J1_CSN_CFG3_4
+    type: data
+  - from: PICO_GPIO_1
+    to: TMC_J1_SDI_CFG1_2
+    type: data
+  - from: PICO_GPIO_0
+    to: TMC_J1_SDO_CFG0_5
+    type: data
+  - from: PICO_GND_03
+    to: TMC_J2_GND_LOGIC_8
+    type: ground
+  - from: PICO_GND_08
+    to: TMC_J2_GND_MOTOR_2
+    type: ground
+  - from: PICO_THREEV3_OUT_36
+    to: TMC_J2_VIO_7
+    type: lv_power

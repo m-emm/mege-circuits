@@ -112,6 +112,16 @@ from mege_circuits.physical import (
     write_stripboard_build_json,
     write_stripboard_build_outputs,
 )
+from mege_circuits.pinout import (
+    PinoutProject,
+    analyze_all_connections,
+    analyze_connection_violations,
+    find_optimal_waypoint,
+    generate_routed_svg,
+    load_pinout_config,
+    route_problematic_connections,
+    write_svg,
+)
 
 __all__ = [
     "Alignment",
@@ -137,6 +147,7 @@ __all__ = [
     "PlacedComponent",
     "PlacedConnector",
     "PlacedPin",
+    "PinoutProject",
     "Resistor",
     "SchemaNetVisualization",
     "SchemaTerminalVisualization",
@@ -153,6 +164,8 @@ __all__ = [
     "Zener",
     "align",
     "align_translation",
+    "analyze_all_connections",
+    "analyze_connection_violations",
     "assign_schema_nets_to_stripboard",
     "check_schema_erc",
     "circuit_from_schema",
@@ -169,8 +182,11 @@ __all__ = [
     "default_footprints",
     "extract_physical_netlist",
     "export_netlist",
+    "find_optimal_waypoint",
     "footprint_for_component",
+    "generate_routed_svg",
     "get_schema_net_visualizations",
+    "load_pinout_config",
     "modify_label_alignment",
     "plan_stripboard",
     "placed_component_pins",
@@ -183,6 +199,7 @@ __all__ = [
     "render_stripboard_layout",
     "render_stripboard_layout_print_pdf",
     "render_stripboard_overlay",
+    "route_problematic_connections",
     "rotate",
     "score_stripboard_layout",
     "snap_schema_to_stripboard",
@@ -192,4 +209,5 @@ __all__ = [
     "write_stripboard_build_checklist",
     "write_stripboard_build_json",
     "write_stripboard_build_outputs",
+    "write_svg",
 ]
