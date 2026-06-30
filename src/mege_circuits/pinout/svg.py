@@ -9,6 +9,7 @@ from xml.etree import ElementTree as ET
 
 DEFAULT_COLOR_MAP = {
     "power": "red",
+    "hazard_power": "#8b4513",
     "lv_power": "grey",
     "ground": "black",
     "clock": "blue",

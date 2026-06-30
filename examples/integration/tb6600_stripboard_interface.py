@@ -59,7 +59,7 @@ REFDES = {
 def create_tb6600_nets():
     net_kinds = {
         "v5": "power",
-        "v24": "power",
+        "v24": "hazard_power",
         "gnd": "ground",
         "step_pul_minus": "data",
         "step_base": "data",

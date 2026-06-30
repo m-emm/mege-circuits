@@ -1399,6 +1399,7 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(
     data = json.loads(outputs.data_json.read_text(encoding="utf-8"))
     top_svg = outputs.top_svg.read_text(encoding="utf-8")
     assert data["circuit"]["net_kinds"]["v5"] == "power"
+    assert data["circuit"]["net_kinds"]["v24"] == "hazard_power"
     assert data["circuit"]["net_kinds"]["gnd"] == "ground"
     assert data["circuit"]["net_kinds"]["step_pul_minus"] == "data"
     assert data["layout"]["board"]["width_pitches"] <= 14
@@ -1425,6 +1426,9 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(
     assert 'data-net="v5"' in top_svg
     assert 'data-net-kind="power"' in top_svg
     assert 'data-color="red"' in top_svg
+    assert 'data-net="v24"' in top_svg
+    assert 'data-net-kind="hazard_power"' in top_svg
+    assert 'data-color="#8b4513"' in top_svg
     assert 'data-net-kind="ground"' in top_svg
     assert 'data-color="black"' in top_svg
     assert 'data-net-kind="data"' in top_svg

@@ -56,6 +56,7 @@ metadata:
 
 color_map:
   power: "#d62728"
+  hazard_power: "#8b4513"
   ground: "#111111"
   clock: "#1f77b4"
   data: "#f2c94c"
