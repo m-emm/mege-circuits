@@ -1,4 +1,9 @@
-"""Render the verified TB6600 stripboard build artifacts."""
+"""Render the verified TB6600 stripboard regression/demo artifacts.
+
+The active Mege Ender IDEX wiring source is maintained in the
+``mege-ender-3v3ke-idex`` repository. This example remains in ``mege-circuits``
+to exercise the reusable verified stripboard planner.
+"""
 
 import logging
 import shutil

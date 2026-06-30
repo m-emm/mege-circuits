@@ -1,4 +1,9 @@
-"""Render the planned Pico-to-TB6600 stripboard interface schematic."""
+"""Render the Pico-to-TB6600 schematic regression/demo copy.
+
+The active Mege Ender IDEX wiring source is maintained in the
+``mege-ender-3v3ke-idex`` repository. This example remains in ``mege-circuits``
+to exercise the reusable schematic and stripboard APIs.
+"""
 
 import logging
 import os

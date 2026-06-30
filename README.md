@@ -70,8 +70,8 @@ python examples/voltage_divider.py
 python examples/stripboard_blank.py
 ```
 
-The main real-world integration example is the Pico-to-TB6600 stripboard
-interface:
+The main real-world integration/regression example is the Pico-to-TB6600
+stripboard interface:
 
 ```bash
 python examples/integration/tb6600_stripboard_interface.py
@@ -84,6 +84,10 @@ artifacts next to the example by default. The test suite renders them into
 integration output is easy to inspect after changes. Each render uses a unique
 timestamped filename to avoid local preview caches; stable filenames in that
 directory are symlinks to the newest generated artifacts.
+
+For the Mege Ender IDEX printer wiring, the source of truth lives in the
+`mege-ender-3v3ke-idex` repository. This copy stays here to exercise the public
+schematic and verified stripboard APIs against a realistic circuit.
 
 ## Documentation
 
