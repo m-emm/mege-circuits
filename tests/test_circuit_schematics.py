@@ -272,6 +272,8 @@ def test_tb6600_integration_examples_render_stable_artifacts(tb6600_verified_pla
     stripboard_png = stripboard_outputs.top_png
     stripboard_values_svg = stripboard_outputs.top_values_svg
     stripboard_values_png = stripboard_outputs.top_values_png
+    stripboard_a4_pdf = stripboard_outputs.top_a4_pdf
+    stripboard_values_a4_pdf = stripboard_outputs.top_values_a4_pdf
 
     assert "<svg" in schematic_svg.read_text(encoding="utf-8")
     assert schematic_png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
@@ -279,6 +281,8 @@ def test_tb6600_integration_examples_render_stable_artifacts(tb6600_verified_pla
     assert stripboard_png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     assert "Q1 BC337" in stripboard_values_svg.read_text(encoding="utf-8")
     assert stripboard_values_png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert stripboard_a4_pdf.read_bytes().startswith(b"%PDF")
+    assert stripboard_values_a4_pdf.read_bytes().startswith(b"%PDF")
     assert schematic_svg.parent == stripboard_svg.parent
     assert schematic_svg.parent.name == "diagrams"
     assert schematic_svg.stem.startswith(f"{SCHEMATIC_ARTIFACT_STEM}__")
@@ -287,6 +291,10 @@ def test_tb6600_integration_examples_render_stable_artifacts(tb6600_verified_pla
     assert stripboard_png.stem.startswith(f"{STRIPBOARD_ARTIFACT_STEM}__")
     assert stripboard_values_svg.stem.startswith(f"{STRIPBOARD_ARTIFACT_STEM}_values__")
     assert stripboard_values_png.stem.startswith(f"{STRIPBOARD_ARTIFACT_STEM}_values__")
+    assert stripboard_a4_pdf.stem.startswith(f"{STRIPBOARD_ARTIFACT_STEM}_a4__")
+    assert stripboard_values_a4_pdf.stem.startswith(
+        f"{STRIPBOARD_ARTIFACT_STEM}_values_a4__"
+    )
     _assert_latest_artifact_link(
         schematic_svg.parent / f"{SCHEMATIC_ARTIFACT_STEM}.svg",
         schematic_svg,
@@ -310,6 +318,14 @@ def test_tb6600_integration_examples_render_stable_artifacts(tb6600_verified_pla
     _assert_latest_artifact_link(
         stripboard_values_png.parent / f"{STRIPBOARD_ARTIFACT_STEM}_values.png",
         stripboard_values_png,
+    )
+    _assert_latest_artifact_link(
+        stripboard_a4_pdf.parent / f"{STRIPBOARD_ARTIFACT_STEM}_a4.pdf",
+        stripboard_a4_pdf,
+    )
+    _assert_latest_artifact_link(
+        stripboard_values_a4_pdf.parent / f"{STRIPBOARD_ARTIFACT_STEM}_values_a4.pdf",
+        stripboard_values_a4_pdf,
     )
     assert not tuple(stripboard_svg.parent.glob("*projection*"))
 

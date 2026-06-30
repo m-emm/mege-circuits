@@ -646,7 +646,7 @@ def prune_tb6600_artifacts(output_dir, stem, *, keep=(), remove_stable=False):
     output_dir = Path(output_dir)
     keep_paths = {Path(path) for path in keep}
     for artifact_stem in _tb6600_artifact_family_stems(stem):
-        for suffix in (".svg", ".png", ".md", ".json"):
+        for suffix in (".svg", ".png", ".pdf", ".md", ".json"):
             latest = output_dir / f"{artifact_stem}{suffix}"
             if remove_stable and (latest.exists() or latest.is_symlink()):
                 latest.unlink()
@@ -663,6 +663,8 @@ def _tb6600_artifact_family_stems(stem):
     return (
         stem,
         f"{stem}_values",
+        f"{stem}_a4",
+        f"{stem}_values_a4",
         f"{stem}_bottom",
         f"{stem}_debug",
         f"{stem}_checklist",

@@ -41,6 +41,7 @@ from mege_circuits.simple import (
     placed_component_pins,
     plan_stripboard,
     render_stripboard_layout,
+    render_stripboard_layout_print_pdf,
     score_stripboard_layout,
     stripboard_hints_from_schema,
     verify_stripboard_layout,
@@ -239,6 +240,45 @@ def test_render_stripboard_layout_writes_svg_and_png(tmp_path):
     annotated_svg = annotated_path.read_text(encoding="utf-8")
     assert 'class="layout-blocker"' in annotated_svg
     assert 'class="layout-terminal-hole-label"' not in annotated_svg
+
+
+def test_render_stripboard_layout_print_pdf_is_true_scale(tmp_path):
+    circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
+    layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(8, 4),
+        placements={
+            "R1": ((0, 0), 0),
+            "R2": ((2, 0), 0),
+        },
+        cuts=((0, 1),),
+    )
+    pdf_path = tmp_path / "manual_layout_a4.pdf"
+
+    render_stripboard_layout_print_pdf(layout, circuit, file=pdf_path)
+
+    assert pdf_path.read_bytes().startswith(b"%PDF")
+    geometry = physical._stripboard_print_geometry(layout, circuit)
+    assert geometry["orientation"] == "portrait"
+    assert geometry["board_width_mm"] == pytest.approx(8 * 2.54)
+    assert geometry["board_height_mm"] == pytest.approx(4 * 2.54)
+    assert geometry["pitch_mm"] == pytest.approx(2.54)
+    assert physical._print_font_size(0.145, 2.54) == pytest.approx(1.04, abs=0.01)
+
+    large_layout = create_manual_stripboard_layout(
+        circuit,
+        board=create_stripboard(120, 8),
+        placements={
+            "R1": ((0, 0), 0),
+            "R2": ((2, 0), 0),
+        },
+    )
+    with pytest.raises(ValueError, match="does not fit on A4 at 1:1 scale"):
+        render_stripboard_layout_print_pdf(
+            large_layout,
+            circuit,
+            file=tmp_path / "too_large.pdf",
+        )
 
 
 def test_render_stripboard_layout_elbows_same_row_jumpers_without_data_waypoints(
@@ -1092,6 +1132,8 @@ def test_write_stripboard_build_outputs_writes_build_artifacts(tmp_path):
         encoding="utf-8"
     )
     assert outputs.top_values_png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert outputs.top_a4_pdf.read_bytes().startswith(b"%PDF")
+    assert outputs.top_values_a4_pdf.read_bytes().startswith(b"%PDF")
     assert 'class="bottom-strip-cut"' in outputs.bottom_svg.read_text(encoding="utf-8")
     assert 'class="debug-conductor-hole"' in outputs.debug_svg.read_text(
         encoding="utf-8"
@@ -1229,6 +1271,16 @@ def test_tb6600_build_outputs_include_only_verified_artifacts(
         tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}_values.png",
         outputs.top_values_png,
     )
+    _assert_latest_artifact_link(
+        tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}_a4.pdf",
+        outputs.top_a4_pdf,
+    )
+    _assert_latest_artifact_link(
+        tmp_path / f"{STRIPBOARD_ARTIFACT_STEM}_values_a4.pdf",
+        outputs.top_values_a4_pdf,
+    )
+    assert outputs.top_a4_pdf.read_bytes().startswith(b"%PDF")
+    assert outputs.top_values_a4_pdf.read_bytes().startswith(b"%PDF")
     assert (
         outputs.top_svg.read_text(encoding="utf-8").count(
             'class="layout-terminal-hole-label"'
