@@ -13,11 +13,23 @@ not yet a verified stripboard router or manufacturing plan.
 
 ## Install
 
+From PyPI:
+
+```bash
+pip install mege-circuits
+```
+
+For local development:
+
 ```bash
 git clone git@github.com:m-emm/mege-circuits.git
 cd mege-circuits
 pip install -e ".[testing]"
 ```
+
+Vector A4 stripboard PDF generation uses `rsvg-convert`. Install it with
+`brew install librsvg` on macOS or `sudo apt-get install librsvg2-bin` on
+Debian/Ubuntu.
 
 ## Quick Start
 
@@ -78,6 +90,7 @@ directory are symlinks to the newest generated artifacts.
 - [DSL guide](docs/dsl-guide.md)
 - [Alignment notes](docs/alignment-based-schemdraw.md)
 - [Stripboard planning blueprint](docs/blueprint.md)
+- [PyPI publishing](docs/pypi-publishing.md)
 
 The blueprint describes how the current projection path should evolve into a
 netlist-driven, verified stripboard planner while keeping the visualization
