@@ -126,6 +126,14 @@ from mege_circuits.pinout import (
     route_problematic_connections,
     write_svg,
 )
+from mege_circuits.stripboard import (
+    StripboardLayoutProject,
+    circuit_fingerprint,
+    load_stripboard_layout_config,
+    render_stripboard_layout_config,
+    stripboard_layout_yaml_data,
+    write_stripboard_layout_yaml,
+)
 
 __all__ = [
     "Alignment",
@@ -161,6 +169,7 @@ __all__ = [
     "StripboardBuildOutputs",
     "StripboardBlocker",
     "StripboardCut",
+    "StripboardLayoutProject",
     "StripboardLocalPoint",
     "StripboardNetAssignment",
     "StripboardNetRun",
@@ -175,6 +184,7 @@ __all__ = [
     "assign_schema_nets_to_stripboard",
     "check_schema_erc",
     "circuit_from_schema",
+    "circuit_fingerprint",
     "compact_sparse_stripboard_rows",
     "compact_stripboard_connections_left",
     "create_element",
@@ -194,6 +204,7 @@ __all__ = [
     "get_schema_net_visualizations",
     "kind_color",
     "load_pinout_config",
+    "load_stripboard_layout_config",
     "modify_label_alignment",
     "net_color",
     "plan_stripboard",
@@ -205,6 +216,7 @@ __all__ = [
     "render_stripboard_bottom",
     "render_stripboard_debug",
     "render_stripboard_layout",
+    "render_stripboard_layout_config",
     "render_stripboard_layout_print_pdf",
     "render_stripboard_overlay",
     "route_problematic_connections",
@@ -212,10 +224,12 @@ __all__ = [
     "score_stripboard_layout",
     "snap_schema_to_stripboard",
     "stripboard_hints_from_schema",
+    "stripboard_layout_yaml_data",
     "translate",
     "verify_stripboard_layout",
     "write_stripboard_build_checklist",
     "write_stripboard_build_json",
     "write_stripboard_build_outputs",
+    "write_stripboard_layout_yaml",
     "write_svg",
 ]

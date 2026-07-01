@@ -109,14 +109,23 @@ class PlacedComponent:
 class Jumper:
     start: tuple[int, int]
     end: tuple[int, int]
-    net_name: str
+    net_name: str = ""
+    kind: str = dsl.DEFAULT_NET_KIND
+    color: str | None = None
+    verify_net: bool = True
 
     def __post_init__(self):
         object.__setattr__(
             self, "start", _coerce_grid_point(self.start, "jumper start")
         )
         object.__setattr__(self, "end", _coerce_grid_point(self.end, "jumper end"))
-        object.__setattr__(self, "net_name", str(self.net_name))
+        object.__setattr__(
+            self, "net_name", "" if self.net_name is None else str(self.net_name)
+        )
+        object.__setattr__(self, "kind", dsl._normalize_net_kind(self.kind))
+        if self.color is not None:
+            object.__setattr__(self, "color", str(self.color))
+        object.__setattr__(self, "verify_net", bool(self.verify_net))
 
 
 @dataclass(frozen=True)
@@ -127,15 +136,22 @@ class PlacedConnector:
     label: str | None = None
     kind: str = "nail"
     net_kind: str = dsl.DEFAULT_NET_KIND
+    verify: bool = True
+    color: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "name", str(self.name))
-        object.__setattr__(self, "net_name", str(self.net_name))
+        object.__setattr__(
+            self, "net_name", "" if self.net_name is None else str(self.net_name)
+        )
         object.__setattr__(self, "hole", _coerce_grid_point(self.hole, "connector"))
         if self.label is not None:
             object.__setattr__(self, "label", str(self.label))
         object.__setattr__(self, "kind", str(self.kind))
         object.__setattr__(self, "net_kind", dsl._normalize_net_kind(self.net_kind))
+        object.__setattr__(self, "verify", bool(self.verify))
+        if self.color is not None:
+            object.__setattr__(self, "color", str(self.color))
 
     @property
     def row(self):
@@ -3490,26 +3506,10 @@ def _stripboard_build_json_data(layout, circuit, report):
             ],
             "cuts": [{"row": cut.row, "col": cut.col} for cut in layout.cuts],
             "connectors": [
-                {
-                    "name": connector.name,
-                    "label": connector.label,
-                    "kind": connector.kind,
-                    "net_kind": _connector_net_kind(connector, circuit),
-                    "color": _connector_color(connector, circuit),
-                    "net_name": connector.net_name,
-                    "row": connector.row,
-                    "col": connector.col,
-                }
+                _connector_json_data(connector, circuit)
                 for connector in layout.connectors
             ],
-            "jumpers": [
-                {
-                    "net_name": jumper.net_name,
-                    "start": list(jumper.start),
-                    "end": list(jumper.end),
-                }
-                for jumper in layout.jumpers
-            ],
+            "jumpers": [_jumper_json_data(jumper) for jumper in layout.jumpers],
             "blockers": [
                 {
                     "row": blocker.row,
@@ -3539,6 +3539,39 @@ def _stripboard_build_json_data(layout, circuit, report):
             ),
         },
     }
+
+
+def _connector_json_data(connector, circuit):
+    data = {
+        "name": connector.name,
+        "label": connector.label,
+        "kind": connector.kind,
+        "net_kind": _connector_net_kind(connector, circuit),
+        "color": _connector_color(connector, circuit),
+        "net_name": connector.net_name,
+        "row": connector.row,
+        "col": connector.col,
+    }
+    if not connector.verify:
+        data["verify"] = False
+    if connector.color is not None:
+        data["explicit_color"] = connector.color
+    return data
+
+
+def _jumper_json_data(jumper):
+    data = {
+        "net_name": jumper.net_name,
+        "start": list(jumper.start),
+        "end": list(jumper.end),
+    }
+    if jumper.kind != dsl.DEFAULT_NET_KIND:
+        data["kind"] = jumper.kind
+    if jumper.color is not None:
+        data["color"] = jumper.color
+    if not jumper.verify_net:
+        data["verify_net"] = False
+    return data
 
 
 def _physical_netlist_json_data(physical_netlist):
@@ -4764,6 +4797,8 @@ def _physical_layout_drc_issues(layout, circuit):
         issues,
     )
     cut_holes = _valid_cut_holes(layout, issues)
+    _check_visual_connectors_on_cuts(layout.connectors, cut_holes, issues)
+    _check_visual_connector_collisions(layout.connectors, pins, blockers, issues)
     _check_jumpers(layout, circuit, cut_holes, physical_pins, blockers, issues)
     _check_pin_hole_collisions(physical_pins, issues)
     _check_pins_on_cuts(physical_pins, cut_holes, issues)
@@ -4972,7 +5007,7 @@ def _layout_connectors_and_issues(layout, circuit):
                 )
             )
         seen_names.add(connector.name)
-        if connector.net_name not in net_names:
+        if connector.verify and connector.net_name not in net_names:
             issues.append(
                 PhysicalIssue(
                     ERROR,
@@ -4985,7 +5020,8 @@ def _layout_connectors_and_issues(layout, circuit):
                     holes=(connector.hole,),
                 )
             )
-        pins.append(_connector_pin(connector))
+        if connector.verify:
+            pins.append(_connector_pin(connector))
         if not _hole_on_board(layout.board, connector.row, connector.col):
             issues.append(
                 PhysicalIssue(
@@ -5021,6 +5057,8 @@ def _connector_with_hole(connector, hole):
         label=connector.label,
         kind=connector.kind,
         net_kind=connector.net_kind,
+        verify=connector.verify,
+        color=connector.color,
     )
 
 
@@ -5038,12 +5076,26 @@ def _connector_net_kind(connector, circuit):
 
 
 def _connector_color(connector, circuit, kind_color_map=None):
+    if connector.color is not None:
+        return connector.color
     net_kind = _connector_net_kind(connector, circuit)
     return dsl.kind_color(
         net_kind,
         kind_color_map,
         fallback=LAYOUT_CONNECTOR_FILL,
     )
+
+
+def _jumper_color(jumper, kind_color_map=None):
+    if jumper.color is not None:
+        return jumper.color
+    if jumper.kind != dsl.DEFAULT_NET_KIND:
+        return dsl.kind_color(
+            jumper.kind,
+            kind_color_map,
+            fallback=LAYOUT_JUMPER_STROKE,
+        )
+    return LAYOUT_JUMPER_STROKE
 
 
 def _check_component_footprint_assignment(component, footprint, issues):
@@ -5128,7 +5180,7 @@ def _check_jumpers(layout, circuit, cut_holes, pins, blockers, issues):
                 )
             )
             continue
-        if jumper.net_name not in net_names:
+        if jumper.verify_net and jumper.net_name not in net_names:
             issues.append(
                 PhysicalIssue(
                     ERROR,
@@ -5260,6 +5312,79 @@ def _check_pins_on_cuts(pins, cut_holes, issues):
         )
 
 
+def _check_visual_connectors_on_cuts(connectors, cut_holes, issues):
+    for connector in connectors:
+        if not isinstance(connector, PlacedConnector) or connector.verify:
+            continue
+        if connector.hole not in cut_holes:
+            continue
+        issues.append(
+            PhysicalIssue(
+                ERROR,
+                "connector_on_cut",
+                f"Connector {connector.name!r} is on cut hole {connector.hole}.",
+                subject=connector.name,
+                holes=(connector.hole,),
+            )
+        )
+
+
+def _check_visual_connector_collisions(connectors, component_pins, blockers, issues):
+    component_pins_by_hole = {pin.hole: pin for pin in component_pins}
+    blocker_holes = {(blocker.row, blocker.col): blocker for blocker in blockers}
+    semantic_connector_holes = {
+        connector.hole: connector
+        for connector in connectors
+        if isinstance(connector, PlacedConnector) and connector.verify
+    }
+    for connector in connectors:
+        if not isinstance(connector, PlacedConnector) or connector.verify:
+            continue
+        component_pin = component_pins_by_hole.get(connector.hole)
+        if component_pin is not None:
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "connector_pin_collision",
+                    (
+                        f"Connector {connector.name!r} shares component pin hole "
+                        f"{connector.hole} with "
+                        f"{component_pin.refdes}.{component_pin.terminal_name}."
+                    ),
+                    subject=connector.name,
+                    holes=(connector.hole,),
+                )
+            )
+        semantic_connector = semantic_connector_holes.get(connector.hole)
+        if semantic_connector is not None:
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "connector_pin_collision",
+                    (
+                        f"Connector {connector.name!r} shares connector hole "
+                        f"{connector.hole} with {semantic_connector.name!r}."
+                    ),
+                    subject=connector.name,
+                    holes=(connector.hole,),
+                )
+            )
+        blocker = blocker_holes.get(connector.hole)
+        if blocker is not None:
+            issues.append(
+                PhysicalIssue(
+                    ERROR,
+                    "connector_blocker_collision",
+                    (
+                        f"Connector {connector.name!r} collides with blocker for "
+                        f"{blocker.element_name!r} at {connector.hole}."
+                    ),
+                    subject=connector.name,
+                    holes=(connector.hole,),
+                )
+            )
+
+
 def _check_blocker_pin_collisions(blockers, pins, issues):
     pins_by_hole = {}
     for pin in pins:
@@ -5342,7 +5467,7 @@ def _extract_physical_netlist_unchecked(layout, circuit):
 def _layout_physical_pins(layout, circuit):
     return (
         *placed_component_pins(layout, circuit),
-        *(_connector_pin(c) for c in layout.connectors),
+        *(_connector_pin(c) for c in layout.connectors if c.verify),
     )
 
 
@@ -5496,9 +5621,21 @@ def _normalize_jumpers(jumpers):
         if isinstance(jumper, Jumper):
             normalized.append(jumper)
             continue
-        if not isinstance(jumper, tuple) or len(jumper) != 3:
-            raise TypeError("Jumpers must be Jumper objects or (start, end, net_name).")
-        normalized.append(Jumper(start=jumper[0], end=jumper[1], net_name=jumper[2]))
+        if not isinstance(jumper, tuple) or len(jumper) not in (2, 3, 4, 5, 6):
+            raise TypeError(
+                "Jumpers must be Jumper objects or "
+                "(start, end[, net_name[, kind[, color[, verify_net]]]])."
+            )
+        normalized.append(
+            Jumper(
+                start=jumper[0],
+                end=jumper[1],
+                net_name=jumper[2] if len(jumper) >= 3 else "",
+                kind=jumper[3] if len(jumper) >= 4 else dsl.DEFAULT_NET_KIND,
+                color=jumper[4] if len(jumper) >= 5 else None,
+                verify_net=jumper[5] if len(jumper) >= 6 else len(jumper) >= 3,
+            )
+        )
     return tuple(
         sorted(normalized, key=lambda item: (item.net_name, item.start, item.end))
     )
@@ -5510,14 +5647,23 @@ def _normalize_connectors(connectors):
         if isinstance(connector, PlacedConnector):
             normalized.append(connector)
             continue
-        if not isinstance(connector, tuple) or len(connector) not in (3, 4, 5, 6):
+        if not isinstance(connector, tuple) or len(connector) not in (
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+        ):
             raise TypeError(
                 "Connectors must be PlacedConnector objects or "
-                "(name, net_name, hole[, label[, kind[, net_kind]]])."
+                "(name, net_name, hole[, label[, kind[, net_kind[, verify[, color]]]]])."
             )
         label = connector[3] if len(connector) >= 4 else None
         kind = connector[4] if len(connector) >= 5 else "nail"
         net_kind = connector[5] if len(connector) >= 6 else dsl.DEFAULT_NET_KIND
+        verify = connector[6] if len(connector) >= 7 else True
+        color = connector[7] if len(connector) >= 8 else None
         normalized.append(
             PlacedConnector(
                 name=connector[0],
@@ -5526,6 +5672,8 @@ def _normalize_connectors(connectors):
                 label=label,
                 kind=kind,
                 net_kind=net_kind,
+                verify=verify,
+                color=color,
             )
         )
     return tuple(sorted(normalized, key=lambda item: item.name))
@@ -5588,12 +5736,13 @@ def _validate_layout_geometry(layout, circuit, footprint_map):
 
     net_names = {net.name for net in circuit.nets}
     for jumper in layout.jumpers:
-        if jumper.net_name not in net_names:
+        if jumper.verify_net and jumper.net_name not in net_names:
             raise ValueError(f"Jumper uses unknown net {jumper.net_name!r}.")
         _require_hole_on_board(layout.board, *jumper.start, "jumper start")
         _require_hole_on_board(layout.board, *jumper.end, "jumper end")
 
-    pin_holes = {}
+    semantic_pin_holes = {}
+    all_terminal_holes = {}
     for pin in placed_component_pins(layout, circuit):
         _require_hole_on_board(layout.board, pin.row, pin.col, "component pin")
         if pin.hole in cut_holes:
@@ -5601,21 +5750,22 @@ def _validate_layout_geometry(layout, circuit, footprint_map):
                 f"Component pin {pin.refdes}.{pin.terminal_name} is on cut hole "
                 f"{pin.hole}."
             )
-        if pin.hole in pin_holes:
-            other = pin_holes[pin.hole]
+        if pin.hole in all_terminal_holes:
+            other = all_terminal_holes[pin.hole]
             raise ValueError(
                 f"Multiple component pins share hole {pin.hole}: "
                 f"{other.refdes}.{other.terminal_name} and "
                 f"{pin.refdes}.{pin.terminal_name}."
             )
-        pin_holes[pin.hole] = pin
+        semantic_pin_holes[pin.hole] = pin
+        all_terminal_holes[pin.hole] = pin
 
     connector_names = set()
     for connector in layout.connectors:
         if connector.name in connector_names:
             raise ValueError(f"Connector {connector.name!r} is placed more than once.")
         connector_names.add(connector.name)
-        if connector.net_name not in net_names:
+        if connector.verify and connector.net_name not in net_names:
             raise ValueError(
                 f"Connector {connector.name!r} uses unknown net "
                 f"{connector.net_name!r}."
@@ -5626,18 +5776,20 @@ def _validate_layout_geometry(layout, circuit, footprint_map):
             raise ValueError(
                 f"Connector {connector.name!r} is on cut hole {connector.hole}."
             )
-        if connector.hole in pin_holes:
-            other = pin_holes[connector.hole]
+        if connector.hole in all_terminal_holes:
+            other = all_terminal_holes[connector.hole]
             raise ValueError(
                 f"Multiple physical terminals share hole {connector.hole}: "
                 f"{other.refdes}.{other.terminal_name} and connector "
                 f"{connector.name}."
             )
-        pin_holes[connector.hole] = connector_pin
+        if connector.verify:
+            semantic_pin_holes[connector.hole] = connector_pin
+        all_terminal_holes[connector.hole] = connector_pin
 
     for blocker in layout.blockers:
         _require_hole_on_board(layout.board, blocker.row, blocker.col, "blocker")
-        pin = pin_holes.get((blocker.row, blocker.col))
+        pin = all_terminal_holes.get((blocker.row, blocker.col))
         if pin is not None:
             raise ValueError(
                 f"Blocker for {blocker.element_name!r} collides with pin "
@@ -5647,8 +5799,8 @@ def _validate_layout_geometry(layout, circuit, footprint_map):
     blocker_holes = {(blocker.row, blocker.col) for blocker in layout.blockers}
     for jumper in layout.jumpers:
         for label, hole in (("start", jumper.start), ("end", jumper.end)):
-            if hole in pin_holes:
-                pin = pin_holes[hole]
+            if hole in semantic_pin_holes:
+                pin = semantic_pin_holes[hole]
                 raise ValueError(
                     f"Jumper {label} endpoint {hole} shares component pin "
                     f"{pin.refdes}.{pin.terminal_name}."
@@ -5711,7 +5863,7 @@ def _render_stripboard_layout_svg(
     ]
     _append_svg_board(lines, layout.board)
     _append_svg_layout_cuts(lines, layout.cuts)
-    _append_svg_layout_jumpers(lines, layout.jumpers)
+    _append_svg_layout_jumpers(lines, layout.jumpers, kind_color_map)
     overlays = _layout_component_overlays(layout, circuit, pins, component_labels)
     _append_svg_layout_component_segments(lines, overlays)
     if detail == "assembly" and component_labels == "refdes":
@@ -5769,13 +5921,14 @@ def _append_svg_layout_cuts(lines, cuts):
             )
 
 
-def _append_svg_layout_jumpers(lines, jumpers):
+def _append_svg_layout_jumpers(lines, jumpers, kind_color_map=None):
     for jumper in jumpers:
+        color = _jumper_color(jumper, kind_color_map)
         _append_svg_jumper_wire(
             lines,
             jumper,
             class_name="layout-jumper",
-            stroke=LAYOUT_JUMPER_STROKE,
+            stroke=color,
             stroke_width=LAYOUT_JUMPER_STROKE_WIDTH,
         )
         for row, col in (jumper.start, jumper.end):
@@ -5787,7 +5940,7 @@ def _append_svg_layout_jumpers(lines, jumpers):
                 f'cx="{x:.3f}" cy="{y:.3f}" '
                 f'r="{LAYOUT_JUMPER_ENDPOINT_RADIUS:.3f}" '
                 f'fill="{LAYOUT_JUMPER_ENDPOINT_FILL}" '
-                f'stroke="{LAYOUT_JUMPER_STROKE}" '
+                f'stroke="{color}" '
                 f'stroke-width="{LAYOUT_JUMPER_STROKE_WIDTH:.3f}"/>'
             )
 
@@ -6002,12 +6155,13 @@ def _render_stripboard_layout_png(
     jumper_width = max(1, int(round(LAYOUT_JUMPER_STROKE_WIDTH * scale)))
     jumper_endpoint_width = max(1, int(round(LAYOUT_JUMPER_STROKE_WIDTH * scale)))
     for jumper in layout.jumpers:
+        jumper_color = _jumper_color(jumper, kind_color_map)
         draw.line(
             [
                 dsl._px_point(dsl._offset_point(point, label_margin, 0), scale)
                 for point in _jumper_display_points(jumper)
             ],
-            fill=LAYOUT_JUMPER_STROKE,
+            fill=jumper_color,
             width=jumper_width,
         )
         for hole in (jumper.start, jumper.end):
@@ -6025,7 +6179,7 @@ def _render_stripboard_layout_png(
                     scale,
                 ),
                 fill=LAYOUT_JUMPER_ENDPOINT_FILL,
-                outline=LAYOUT_JUMPER_STROKE,
+                outline=jumper_color,
                 width=jumper_endpoint_width,
             )
 

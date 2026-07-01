@@ -42,6 +42,7 @@ Issues = "https://github.com/m-emm/mege-circuits/issues"
 
 [project.scripts]
 mege-circuits-pinout = "mege_circuits.pinout.cli:main"
+mege-circuits-stripboard = "mege_circuits.stripboard.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
