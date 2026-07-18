@@ -12,10 +12,10 @@ from pathlib import Path
 from mege_circuits.simple import (
     assign_schema_nets_to_stripboard,
     circuit_from_schema,
-    compact_sparse_stripboard_rows,
+    compact_sparse_stripboard_tracks,
     compact_stripboard_connections_left,
     create_stripboard,
-    permute_stripboard_rows_for_element_span,
+    permute_stripboard_tracks_for_element_span,
     plan_stripboard,
     render_stripboard_overlay,
     stripboard_hints_from_schema,
@@ -51,9 +51,9 @@ TB6600_PRIORITY_ELEMENTS = ("Q1", "Q2", "Q3")
 def create_stripboard_projection():
     schema = create_schema_for_tb6600_interface()
     assignment = assign_schema_nets_to_stripboard(schema)
-    assignment = compact_sparse_stripboard_rows(assignment, schema=schema)
+    assignment = compact_sparse_stripboard_tracks(assignment, schema=schema)
     assignment = compact_stripboard_connections_left(schema, assignment, strict=True)
-    assignment = permute_stripboard_rows_for_element_span(
+    assignment = permute_stripboard_tracks_for_element_span(
         schema,
         assignment,
         priority_element_names=("Q1", "Q2", "Q3"),

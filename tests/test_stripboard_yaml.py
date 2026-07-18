@@ -31,9 +31,9 @@ def _connected_divider_layout():
         board=create_stripboard(9, 1),
         placements={
             "R1": ((0, 0), 0),
-            "R2": ((0, 5), 0),
+            "R2": ((5, 0), 0),
         },
-        cuts=((0, 1), (0, 7)),
+        cuts=((1, 0), (7, 0)),
     )
     return circuit, layout
 
@@ -63,7 +63,7 @@ def test_stripboard_yaml_dump_uses_visible_terminal_coordinates(tmp_path):
     assert "kind:" not in text
     assert "value:" not in text
     assert "terminals:" not in text
-    assert "R1: [[0, 0], [0, 3]]" in text
+    assert "R1: [[0, 0], [3, 0]]" in text
 
     project = load_stripboard_layout_config(yaml_path)
     assert project.report.ok, project.report.summary()
@@ -111,7 +111,7 @@ def test_stripboard_yaml_loads_directional_visible_terminal_labels(tmp_path):
                 f"  fingerprint: {circuit_fingerprint(circuit)}",
                 "board: {size: [3, 3], pitch_mm: 2.54}",
                 "components:",
-                "  Q1: {c: [0, 0], b: [1, 0], e: [2, 0]}",
+                "  Q1: {c: [0, 2], b: [0, 1], e: [0, 0]}",
                 "",
             ]
         ),
@@ -123,7 +123,7 @@ def test_stripboard_yaml_loads_directional_visible_terminal_labels(tmp_path):
     assert {
         pin.terminal_name: pin.hole
         for pin in placed_component_pins(project.layout, project.circuit)
-    } == {"collector": (0, 0), "base": (1, 0), "emitter": (2, 0)}
+    } == {"collector": (0, 2), "base": (0, 1), "emitter": (0, 0)}
 
     dumped_path = tmp_path / "bjt_dumped.yaml"
     write_stripboard_layout_yaml(
@@ -133,7 +133,7 @@ def test_stripboard_yaml_loads_directional_visible_terminal_labels(tmp_path):
         source_factory=factory,
         basename="bjt_fixture",
     )
-    assert "Q1: {c: [0, 0], b: [1, 0], e: [2, 0]}" in dumped_path.read_text(
+    assert "Q1: {c: [0, 2], b: [0, 1], e: [0, 0]}" in dumped_path.read_text(
         encoding="utf-8"
     )
 
@@ -142,7 +142,7 @@ def test_stripboard_yaml_added_cut_can_break_original_net(tmp_path):
     yaml_path = tmp_path / "divider_open.yaml"
     _write_connected_divider_yaml(yaml_path)
     data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
-    data["cuts"].append([0, 4])
+    data["cuts"].append([4, 0])
     yaml_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     project = load_stripboard_layout_config(yaml_path)
@@ -157,11 +157,11 @@ def test_stripboard_yaml_added_jumper_can_short_original_nets(tmp_path):
     data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     data["board"] = {"size": [11, 1], "pitch_mm": 2.54}
     data["components"] = {
-        "R1": [[0, 0], [0, 4]],
-        "R2": [[0, 6], [0, 10]],
+        "R1": [[0, 0], [4, 0]],
+        "R2": [[6, 0], [10, 0]],
     }
-    data["cuts"] = [[0, 2], [0, 8]]
-    data["jumpers"] = [{"from": [0, 1], "to": [0, 9], "color": "#00b894"}]
+    data["cuts"] = [[2, 0], [8, 0]]
+    data["jumpers"] = [{"from": [1, 0], "to": [9, 0], "color": "#00b894"}]
     yaml_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     project = load_stripboard_layout_config(yaml_path)
@@ -174,9 +174,9 @@ def test_stripboard_yaml_visual_pins_and_connectors_are_not_semantic(tmp_path):
     yaml_path = tmp_path / "divider_visual.yaml"
     _write_connected_divider_yaml(yaml_path)
     data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
-    data["pins"] = {"probe": {"at": [0, 2], "label": "PROBE", "type": "aux"}}
+    data["pins"] = {"probe": {"at": [2, 0], "label": "PROBE", "type": "aux"}}
     data["connectors"] = [
-        {"name": "aux_mid", "at": [0, 6], "net": "midpoint", "label": "AUX"}
+        {"name": "aux_mid", "at": [6, 0], "net": "midpoint", "label": "AUX"}
     ]
     yaml_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
@@ -195,7 +195,7 @@ def test_stripboard_yaml_visual_pins_and_connectors_are_not_semantic(tmp_path):
         == PlacedConnector(
             "aux_mid",
             "midpoint",
-            (0, 6),
+            (6, 0),
             "AUX",
             verify=False,
         )

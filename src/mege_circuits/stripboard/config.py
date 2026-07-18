@@ -219,8 +219,8 @@ def stripboard_layout_yaml_data(
     )
     data["components"] = _component_yaml_data(layout, circuit)
     data["cuts"] = [
-        _FlowList([cut.row, cut.col])
-        for cut in sorted(layout.cuts, key=lambda item: (item.row, item.col))
+        _FlowList([cut.x, cut.y])
+        for cut in sorted(layout.cuts, key=lambda item: (item.x, item.y))
     ]
     semantic_connectors = []
     visual_pins = {}
@@ -651,7 +651,7 @@ def _load_connectors(data: dict[str, Any], circuit: Circuit, hints):
         if isinstance(raw_pin, (list, tuple)):
             raw_pin = {"at": raw_pin}
         if not isinstance(raw_pin, dict):
-            raise ValueError(f"pins.{name} must be a mapping or [row, col]")
+            raise ValueError(f"pins.{name} must be a mapping or [x, y]")
         connectors.append(
             PlacedConnector(
                 name=str(name),
@@ -787,21 +787,29 @@ def _jumper_yaml_data(jumper: Jumper):
 
 
 def _dump_stripboard_yaml(data: dict[str, Any]):
-    return (
-        yaml.dump(
-            data,
-            Dumper=_StripboardYamlDumper,
-            sort_keys=False,
-            default_flow_style=False,
-            allow_unicode=False,
-        )
-        + "\n"
+    text = yaml.dump(
+        data,
+        Dumper=_StripboardYamlDumper,
+        sort_keys=False,
+        default_flow_style=False,
+        allow_unicode=False,
     )
+    coordinate_note = (
+        "################\n"
+        "# Note on the coordinate system:\n"
+        "# The origin (0,0) is at the bottom-left corner\n"
+        "# coordinates are [ X, Y ]\n"
+        "# X increasing to the right\n"
+        "# Y increasing upwards\n"
+        "# ##############\n"
+    )
+    text = text.replace("\nboard:", f"\n{coordinate_note}board:", 1)
+    return text + "\n"
 
 
 def _as_grid_point(value: Any, *, context: str) -> tuple[int, int]:
     if not isinstance(value, (list, tuple)) or len(value) != 2:
-        raise ValueError(f"{context} must be [row, col], got: {value!r}")
+        raise ValueError(f"{context} must be [x, y], got: {value!r}")
     return (
         _as_int(value[0], context=f"{context}[0]"),
         _as_int(value[1], context=f"{context}[1]"),

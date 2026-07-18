@@ -70,6 +70,53 @@ def test_default_footprints_cover_current_example_components():
             }
 
 
+def test_default_footprints_cover_extended_analog_elements():
+    footprints = default_footprints()
+    components = (
+        Component(
+            refdes="D1",
+            kind="diode",
+            value="1N4148",
+            terminals=(Terminal("start", "a"), Terminal("end", "k")),
+        ),
+        Component(
+            refdes="Q1",
+            kind="bjt_pnp",
+            value="BC327",
+            terminals=(
+                Terminal("base", "b"),
+                Terminal("collector", "c"),
+                Terminal("emitter", "e"),
+            ),
+        ),
+        Component(
+            refdes="U2",
+            kind="dual_optocoupler",
+            value="ILD74",
+            terminals=tuple(
+                Terminal(name, name)
+                for name in (
+                    "a_anode",
+                    "a_cathode",
+                    "a_collector",
+                    "a_emitter",
+                    "b_anode",
+                    "b_cathode",
+                    "b_collector",
+                    "b_emitter",
+                )
+            ),
+        ),
+    )
+
+    for component in components:
+        footprint = footprint_for_component(component, footprints)
+        assert component.kind in footprint.component_kinds
+        assert set(footprint.pins) == {
+            terminal.name for terminal in component.terminals
+        }
+
+
 def test_create_manual_stripboard_layout_enumerates_physical_pins():
     circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
 
@@ -78,31 +125,30 @@ def test_create_manual_stripboard_layout_enumerates_physical_pins():
         board=create_stripboard(8, 4),
         footprints=default_footprints(),
         placements={
-            "R1": ((0, 0), 0),
-            "R2": ((2, 0), 0),
+            "R1": ((0, 3), 0),
+            "R2": ((0, 1), 0),
         },
-        cuts=((0, 4), (2, 4)),
+        cuts=((4, 3), (4, 1)),
     )
     pins = placed_component_pins(layout, circuit)
 
     assert isinstance(layout, PhysicalLayout)
     assert all(isinstance(pin, PlacedPin) for pin in pins)
     assert {
-        (pin.refdes, pin.terminal_name): (pin.row, pin.col, pin.net_name)
-        for pin in pins
+        (pin.refdes, pin.terminal_name): (pin.x, pin.y, pin.net_name) for pin in pins
     } == {
-        ("R1", "start"): (0, 0, "vcc"),
-        ("R1", "end"): (0, 3, "midpoint"),
-        ("R2", "start"): (2, 0, "midpoint"),
-        ("R2", "end"): (2, 3, "gnd"),
+        ("R1", "start"): (0, 3, "vcc"),
+        ("R1", "end"): (3, 3, "midpoint"),
+        ("R2", "start"): (0, 1, "midpoint"),
+        ("R2", "end"): (3, 1, "gnd"),
     }
     assert {
-        (blocker.row, blocker.col, blocker.element_name) for blocker in layout.blockers
+        (blocker.x, blocker.y, blocker.element_name) for blocker in layout.blockers
     } == {
-        (0, 1, "R1"),
-        (0, 2, "R1"),
+        (1, 3, "R1"),
+        (2, 3, "R1"),
+        (1, 1, "R2"),
         (2, 1, "R2"),
-        (2, 2, "R2"),
     }
 
 
@@ -166,11 +212,20 @@ def test_staggered_to92_footprint_rotates_and_labels_terminal_holes(tmp_path):
     render_stripboard_layout(layout, circuit, file=svg_path)
     svg = svg_path.read_text(encoding="utf-8")
 
-    assert pins == {"collector": (1, 4), "base": (2, 4), "emitter": (4, 4)}
+    assert pins == {"collector": (1, 4), "base": (1, 3), "emitter": (1, 1)}
     assert svg.count('class="layout-terminal-hole-label"') == 3
-    assert 'data-terminal="collector" data-row="1" data-col="4"' in svg
-    assert 'data-terminal="base" data-row="2" data-col="4"' in svg
-    assert 'data-terminal="emitter" data-row="4" data-col="4"' in svg
+    assert (
+        'data-terminal="collector" data-footprint="to92_cbe_staggered_013" data-y="4" data-x="1"'
+        in svg
+    )
+    assert (
+        'data-terminal="base" data-footprint="to92_cbe_staggered_013" data-y="3" data-x="1"'
+        in svg
+    )
+    assert (
+        'data-terminal="emitter" data-footprint="to92_cbe_staggered_013" data-y="1" data-x="1"'
+        in svg
+    )
 
 
 def test_render_stripboard_layout_writes_svg_and_png(tmp_path):
@@ -179,11 +234,11 @@ def test_render_stripboard_layout_writes_svg_and_png(tmp_path):
         circuit,
         board=create_stripboard(8, 4),
         placements={
-            "R1": ((0, 0), 0),
-            "R2": ((2, 0), 0),
+            "R1": ((0, 3), 0),
+            "R2": ((0, 1), 0),
         },
-        cuts=((0, 1),),
-        jumpers=(((0, 4), (2, 4), "midpoint"),),
+        cuts=((1, 3),),
+        jumpers=(((4, 3), (4, 1), "midpoint"),),
     )
     svg_path = tmp_path / "manual_layout.svg"
     png_path = tmp_path / "manual_layout.png"
@@ -250,10 +305,10 @@ def test_render_stripboard_layout_print_pdf_is_true_scale(tmp_path):
         circuit,
         board=create_stripboard(8, 4),
         placements={
-            "R1": ((0, 0), 0),
-            "R2": ((2, 0), 0),
+            "R1": ((0, 3), 0),
+            "R2": ((0, 1), 0),
         },
-        cuts=((0, 1),),
+        cuts=((1, 3),),
     )
     pdf_path = tmp_path / "manual_layout_a4.pdf"
 
@@ -290,8 +345,8 @@ def test_render_stripboard_layout_print_pdf_is_true_scale(tmp_path):
         circuit,
         board=create_stripboard(120, 8),
         placements={
-            "R1": ((0, 0), 0),
-            "R2": ((2, 0), 0),
+            "R1": ((0, 7), 0),
+            "R2": ((0, 5), 0),
         },
     )
     with pytest.raises(ValueError, match="does not fit on A4 at 1:1 scale"):
@@ -311,8 +366,8 @@ def test_render_stripboard_layout_print_pdf_requires_rsvg_convert(
         circuit,
         board=create_stripboard(8, 4),
         placements={
-            "R1": ((0, 0), 0),
-            "R2": ((2, 0), 0),
+            "R1": ((0, 3), 0),
+            "R2": ((0, 1), 0),
         },
     )
     monkeypatch.setattr(physical.shutil, "which", lambda _name: None)
@@ -325,7 +380,7 @@ def test_render_stripboard_layout_print_pdf_requires_rsvg_convert(
         )
 
 
-def test_render_stripboard_layout_elbows_same_row_jumpers_without_data_waypoints(
+def test_render_stripboard_layout_elbows_same_y_jumpers_without_data_waypoints(
     tmp_path,
 ):
     circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
@@ -333,17 +388,17 @@ def test_render_stripboard_layout_elbows_same_row_jumpers_without_data_waypoints
         circuit,
         board=create_stripboard(12, 2),
         placements={
-            "R1": ((0, 0), 0),
-            "R2": ((0, 8), 0),
+            "R1": ((0, 1), 0),
+            "R2": ((8, 1), 0),
         },
-        cuts=((0, 2), (0, 5), (0, 10)),
-        jumpers=(((0, 4), (0, 6), "midpoint"),),
+        cuts=((2, 1), (5, 1), (10, 1)),
+        jumpers=(((4, 1), (6, 1), "midpoint"),),
     )
     report = verify_stripboard_layout(layout, circuit)
     assert report.ok, report.summary()
 
-    svg_path = tmp_path / "same_row_jumper.svg"
-    data_path = tmp_path / "same_row_jumper.json"
+    svg_path = tmp_path / "same_y_jumper.svg"
+    data_path = tmp_path / "same_y_jumper.json"
     render_stripboard_layout(layout, circuit, file=svg_path)
     write_stripboard_build_json(layout, circuit, report, file=data_path)
 
@@ -356,7 +411,7 @@ def test_render_stripboard_layout_elbows_same_row_jumpers_without_data_waypoints
     points = svg.split('class="layout-jumper"', 1)[1].split('points="', 1)[1]
     assert len(points.split('"', 1)[0].split()) == 4
     assert data["layout"]["jumpers"] == [
-        {"end": [0, 6], "net_name": "midpoint", "start": [0, 4]}
+        {"end_x": 6, "end_y": 1, "net_name": "midpoint", "start_x": 4, "start_y": 1}
     ]
     assert "points" not in data["layout"]["jumpers"][0]
     assert "waypoints" not in data["layout"]["jumpers"][0]
@@ -366,12 +421,12 @@ def test_extract_physical_netlist_and_verification_pass_for_connected_layout():
     circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
     layout = create_manual_stripboard_layout(
         circuit,
-        board=create_stripboard(5, 8),
+        board=create_stripboard(9, 1),
         placements={
-            "R1": ((0, 0), 90),
-            "R2": ((4, 2), 90),
+            "R1": ((0, 0), 0),
+            "R2": ((5, 0), 0),
         },
-        jumpers=(((3, 1), (4, 1), "midpoint"),),
+        cuts=((1, 0), (7, 0)),
     )
 
     physical_netlist = extract_physical_netlist(layout, circuit)
@@ -391,13 +446,12 @@ def test_extract_physical_netlist_respects_strip_cuts():
     circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
     layout = create_manual_stripboard_layout(
         circuit,
-        board=create_stripboard(5, 8),
+        board=create_stripboard(9, 1),
         placements={
             "R1": ((0, 0), 0),
-            "R2": ((4, 2), 90),
+            "R2": ((5, 0), 0),
         },
-        cuts=((0, 1),),
-        jumpers=(((0, 4), (4, 1), "midpoint"),),
+        cuts=((1, 0), (7, 0)),
     )
 
     report = verify_stripboard_layout(layout, circuit)
@@ -413,13 +467,13 @@ def test_manual_layout_connectors_are_physical_pins_and_rendered(tmp_path):
     circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
     layout = create_manual_stripboard_layout(
         circuit,
-        board=create_stripboard(5, 8),
+        board=create_stripboard(9, 1),
         placements={
-            "R1": ((0, 0), 90),
-            "R2": ((4, 2), 90),
+            "R1": ((0, 0), 0),
+            "R2": ((5, 0), 0),
         },
-        jumpers=(((3, 1), (4, 1), "midpoint"),),
-        connectors=(PlacedConnector("J_mid", "midpoint", (3, 2), "MID"),),
+        cuts=((1, 0), (7, 0)),
+        connectors=(PlacedConnector("J_mid", "midpoint", (4, 0), "MID"),),
     )
     report = verify_stripboard_layout(layout, circuit)
     assert report.ok, report.summary()
@@ -442,14 +496,14 @@ def test_manual_layout_connectors_are_physical_pins_and_rendered(tmp_path):
     assert 'class="layout-connector-label"' in svg
     assert data["layout"]["connectors"] == [
         {
-            "col": 2,
+            "x": 4,
             "color": "#2563eb",
             "kind": "nail",
             "label": "MID",
             "name": "J_mid",
             "net_kind": "default",
             "net_name": "midpoint",
-            "row": 3,
+            "y": 0,
         }
     ]
 
@@ -499,10 +553,10 @@ def test_left_compaction_moves_components_as_rigid_units_and_trims_board():
         circuit,
         board=create_stripboard(10, 5),
         placements={
-            "R1": ("axial_2pin_span3", (0, 5), 90),
-            "R2": ("axial_2pin_span3", (1, 7), 90),
+            "R1": ("axial_2pin_span3", (5, 4), 90),
+            "R2": ("axial_2pin_span3", (7, 3), 90),
         },
-        jumpers=(((3, 4), (1, 6), "midpoint"),),
+        jumpers=(((4, 1), (6, 3), "midpoint"),),
     )
 
     compacted, report = physical._left_compact_stripboard_layout(layout, circuit)
@@ -511,16 +565,15 @@ def test_left_compaction_moves_components_as_rigid_units_and_trims_board():
         for pin in placed_component_pins(compacted, circuit)
     }
     blockers = {
-        (blocker.row, blocker.col, blocker.element_name)
-        for blocker in compacted.blockers
+        (blocker.x, blocker.y, blocker.element_name) for blocker in compacted.blockers
     }
 
     assert report.ok, report.summary()
     assert compacted.board.width_pitches == 4
-    assert pins[("R1", "start")] == (0, 0)
-    assert pins[("R1", "end")] == (3, 0)
-    assert {(1, 0, "R1"), (2, 0, "R1")}.issubset(blockers)
-    assert compacted.jumpers == (Jumper(start=(3, 2), end=(1, 2), net_name="midpoint"),)
+    assert pins[("R1", "start")] == (0, 4)
+    assert pins[("R1", "end")] == (0, 1)
+    assert {(0, 2, "R1"), (0, 3, "R1")}.issubset(blockers)
+    assert compacted.jumpers == (Jumper(start=(2, 1), end=(2, 3), net_name="midpoint"),)
 
 
 def test_left_compaction_respects_locked_component_placements():
@@ -529,10 +582,10 @@ def test_left_compaction_respects_locked_component_placements():
         circuit,
         board=create_stripboard(10, 5),
         placements={
-            "R1": ("axial_2pin_span3", (0, 5), 90),
-            "R2": ("axial_2pin_span3", (1, 7), 90),
+            "R1": ("axial_2pin_span3", (5, 4), 90),
+            "R2": ("axial_2pin_span3", (7, 3), 90),
         },
-        jumpers=(((3, 4), (1, 6), "midpoint"),),
+        jumpers=(((4, 1), (6, 3), "midpoint"),),
     )
 
     compacted, report = physical._left_compact_stripboard_layout(
@@ -545,7 +598,7 @@ def test_left_compaction_respects_locked_component_placements():
     assert compacted.board.width_pitches == 7
     assert {
         component.refdes: component.origin for component in compacted.placed_components
-    } == {"R1": (0, 5), "R2": (1, 0)}
+    } == {"R1": (5, 4), "R2": (0, 3)}
 
 
 def test_left_compaction_moves_connectors_left_without_losing_identity():
@@ -554,18 +607,18 @@ def test_left_compaction_moves_connectors_left_without_losing_identity():
         circuit,
         board=create_stripboard(10, 5),
         placements={
-            "R1": ("axial_2pin_span3", (0, 5), 90),
-            "R2": ("axial_2pin_span3", (1, 7), 90),
+            "R1": ("axial_2pin_span3", (5, 4), 90),
+            "R2": ("axial_2pin_span3", (7, 3), 90),
         },
-        jumpers=(((3, 4), (1, 6), "midpoint"),),
-        connectors=(("J_vcc", "vcc", (0, 8), "VCC"),),
+        jumpers=(((4, 1), (6, 3), "midpoint"),),
+        connectors=(("J_vcc", "vcc", (8, 4), "VCC"),),
     )
 
     compacted, report = physical._left_compact_stripboard_layout(layout, circuit)
 
     assert report.ok, report.summary()
     assert compacted.board.width_pitches == 4
-    assert compacted.connectors == (PlacedConnector("J_vcc", "vcc", (0, 1), "VCC"),)
+    assert compacted.connectors == (PlacedConnector("J_vcc", "vcc", (1, 4), "VCC"),)
 
 
 def test_left_compaction_moves_cuts_left_when_split_stays_verified():
@@ -585,7 +638,7 @@ def test_left_compaction_moves_cuts_left_when_split_stays_verified():
         Footprint(
             name="wide_resistor",
             component_kinds=("resistor",),
-            pins={"start": (0, 0), "end": (0, 8)},
+            pins={"start": (0, 0), "end": (8, 0)},
             allowed_rotations=(0,),
         ),
     )
@@ -594,14 +647,14 @@ def test_left_compaction_moves_cuts_left_when_split_stays_verified():
         board=create_stripboard(12, 1),
         footprints=footprints,
         placements={"R1": ("wide_resistor", (0, 0), 0)},
-        cuts=((0, 7),),
+        cuts=((7, 0),),
     )
 
     compacted, report = physical._left_compact_stripboard_layout(layout, circuit)
 
     assert report.ok, report.summary()
     assert compacted.board.width_pitches == 10
-    assert compacted.cuts == (StripboardCut(row=0, col=1),)
+    assert compacted.cuts == (StripboardCut(x=1, y=0),)
 
 
 def test_left_compaction_keeps_jumper_endpoints_inside_cut_bounded_segment():
@@ -628,21 +681,21 @@ def test_left_compaction_keeps_jumper_endpoints_inside_cut_bounded_segment():
         board=create_stripboard(10, 2),
         footprints=footprints,
         placements={
-            "P1": ("test_pin", (0, 0), 0),
-            "P2": ("test_pin", (1, 3), 0),
-            "P3": ("test_pin", (1, 1), 0),
-            "P4": ("test_pin", (1, 0), 0),
+            "P1": ("test_pin", (0, 1), 0),
+            "P2": ("test_pin", (3, 0), 0),
+            "P3": ("test_pin", (1, 0), 0),
+            "P4": ("test_pin", (0, 0), 0),
         },
-        cuts=((1, 2),),
-        jumpers=(((0, 1), (1, 5), "n"),),
+        cuts=((2, 0),),
+        jumpers=(((1, 1), (5, 0), "n"),),
     )
 
     compacted, report = physical._left_compact_stripboard_layout(layout, circuit)
 
     assert report.ok, report.summary()
     assert compacted.board.width_pitches == 6
-    assert compacted.cuts == (StripboardCut(row=1, col=2),)
-    assert compacted.jumpers == (Jumper(start=(0, 1), end=(1, 4), net_name="n"),)
+    assert compacted.cuts == (StripboardCut(x=2, y=0),)
+    assert compacted.jumpers == (Jumper(start=(1, 1), end=(4, 0), net_name="n"),)
 
 
 def test_stripboard_density_metrics_count_unique_occupied_and_empty_holes():
@@ -667,13 +720,13 @@ def test_stripboard_density_metrics_count_unique_occupied_and_empty_holes():
         board=create_stripboard(5, 3),
         footprints=footprints,
         placements={
-            "P1": ("test_pin", (0, 0), 0),
+            "P1": ("test_pin", (0, 2), 0),
             "P2": ("test_pin", (1, 1), 0),
         },
-        cuts=((0, 3),),
-        jumpers=(((0, 4), (1, 4), "n"),),
-        connectors=(("J_n", "n", (0, 2), "N"),),
-        blockers=(StripboardBlocker(row=1, col=2, element_name="keepout"),),
+        cuts=((3, 2),),
+        jumpers=(((4, 2), (4, 1), "n"),),
+        connectors=(("J_n", "n", (2, 2), "N"),),
+        blockers=(StripboardBlocker(x=2, y=1, element_name="keepout"),),
     )
 
     metrics = physical._stripboard_density_metrics(layout, circuit)
@@ -707,9 +760,9 @@ def test_optimizer_absorbs_connector_only_bridge_into_target_conductor():
         circuit,
         board=create_stripboard(5, 2),
         footprints=footprints,
-        placements={"P1": ("test_pin", (0, 0), 0)},
-        jumpers=(((1, 1), (0, 1), "n"),),
-        connectors=(("J_n", "n", (1, 0), "N"),),
+        placements={"P1": ("test_pin", (0, 1), 0)},
+        jumpers=(((1, 0), (1, 1), "n"),),
+        connectors=(("J_n", "n", (0, 0), "N"),),
     )
 
     optimized, report, changed = physical._absorb_connector_only_jumpers(
@@ -720,7 +773,7 @@ def test_optimizer_absorbs_connector_only_bridge_into_target_conductor():
     assert changed
     assert report.ok, report.summary()
     assert optimized.jumpers == ()
-    assert optimized.connectors == (PlacedConnector("J_n", "n", (0, 1), "N"),)
+    assert optimized.connectors == (PlacedConnector("J_n", "n", (1, 1), "N"),)
 
 
 def test_optimizer_keeps_fixed_connector_only_bridge():
@@ -737,14 +790,14 @@ def test_optimizer_keeps_fixed_connector_only_bridge():
         components=(Component("P1", "test_pin", None, (Terminal("pin", "n"),)),),
         nets=(create_net("n"),),
     )
-    fixed_jumper = Jumper(start=(1, 1), end=(0, 1), net_name="n")
+    fixed_jumper = Jumper(start=(1, 0), end=(1, 1), net_name="n")
     layout = create_manual_stripboard_layout(
         circuit,
         board=create_stripboard(5, 2),
         footprints=footprints,
-        placements={"P1": ("test_pin", (0, 0), 0)},
+        placements={"P1": ("test_pin", (0, 1), 0)},
         jumpers=(fixed_jumper,),
-        connectors=(("J_n", "n", (1, 0), "N"),),
+        connectors=(("J_n", "n", (0, 0), "N"),),
     )
 
     optimized, report, changed = physical._absorb_connector_only_jumpers(
@@ -756,7 +809,7 @@ def test_optimizer_keeps_fixed_connector_only_bridge():
     assert not changed
     assert report.ok, report.summary()
     assert optimized.jumpers == (fixed_jumper,)
-    assert optimized.connectors == (PlacedConnector("J_n", "n", (1, 0), "N"),)
+    assert optimized.connectors == (PlacedConnector("J_n", "n", (0, 0), "N"),)
 
 
 def test_right_relax_moves_connector_to_rightmost_empty_hole_before_cut():
@@ -777,10 +830,10 @@ def test_right_relax_moves_connector_to_rightmost_empty_hole_before_cut():
         circuit,
         board=create_stripboard(6, 1),
         footprints=footprints,
-        placements={"P1": ("test_pin", (0, 2), 0)},
-        cuts=((0, 4),),
+        placements={"P1": ("test_pin", (2, 0), 0)},
+        cuts=((4, 0),),
         connectors=(("J_n", "n", (0, 0), "N"),),
-        blockers=(StripboardBlocker(row=0, col=1, element_name="keepout"),),
+        blockers=(StripboardBlocker(x=1, y=0, element_name="keepout"),),
     )
 
     optimized, report, changed = physical._right_relax_flexible_terminals(
@@ -790,7 +843,7 @@ def test_right_relax_moves_connector_to_rightmost_empty_hole_before_cut():
 
     assert changed
     assert report.ok, report.summary()
-    assert optimized.connectors == (PlacedConnector("J_n", "n", (0, 3), "N"),)
+    assert optimized.connectors == (PlacedConnector("J_n", "n", (3, 0), "N"),)
 
 
 def test_optimizer_prunes_redundant_cut_next_to_empty_tail():
@@ -812,7 +865,7 @@ def test_optimizer_prunes_redundant_cut_next_to_empty_tail():
         board=create_stripboard(5, 1),
         footprints=footprints,
         placements={"P1": ("test_pin", (0, 0), 0)},
-        cuts=((0, 2),),
+        cuts=((2, 0),),
     )
 
     optimized, report, changed = physical._prune_redundant_cuts(layout, circuit)
@@ -845,16 +898,16 @@ def test_optimizer_keeps_cut_when_removal_would_short_nets():
         footprints=footprints,
         placements={
             "P1": ("test_pin", (0, 0), 0),
-            "P2": ("test_pin", (0, 4), 0),
+            "P2": ("test_pin", (4, 0), 0),
         },
-        cuts=((0, 2),),
+        cuts=((2, 0),),
     )
 
     optimized, report, changed = physical._prune_redundant_cuts(layout, circuit)
 
     assert not changed
     assert report.ok, report.summary()
-    assert optimized.cuts == (StripboardCut(row=0, col=2),)
+    assert optimized.cuts == (StripboardCut(x=2, y=0),)
 
 
 def test_optimizer_preserves_fixed_redundant_cut():
@@ -876,18 +929,18 @@ def test_optimizer_preserves_fixed_redundant_cut():
         board=create_stripboard(5, 1),
         footprints=footprints,
         placements={"P1": ("test_pin", (0, 0), 0)},
-        cuts=((0, 2),),
+        cuts=((2, 0),),
     )
 
     optimized, report, changed = physical._prune_redundant_cuts(
         layout,
         circuit,
-        fixed_cuts=frozenset(((0, 2),)),
+        fixed_cuts=frozenset(((2, 0),)),
     )
 
     assert not changed
     assert report.ok, report.summary()
-    assert optimized.cuts == (StripboardCut(row=0, col=2),)
+    assert optimized.cuts == (StripboardCut(x=2, y=0),)
 
 
 def test_down_compaction_moves_verified_point_units_down():
@@ -908,8 +961,8 @@ def test_down_compaction_moves_verified_point_units_down():
         circuit,
         board=create_stripboard(4, 3),
         footprints=footprints,
-        placements={"P1": ("test_pin", (0, 0), 0)},
-        cuts=((0, 3),),
+        placements={"P1": ("test_pin", (0, 2), 0)},
+        cuts=((3, 2),),
     )
 
     optimized, report, changed = physical._down_compact_stripboard_layout(
@@ -919,8 +972,8 @@ def test_down_compaction_moves_verified_point_units_down():
 
     assert changed
     assert report.ok, report.summary()
-    assert optimized.placed_components == (PlacedComponent("P1", "test_pin", (2, 0)),)
-    assert optimized.cuts == (StripboardCut(row=2, col=3),)
+    assert optimized.placed_components == (PlacedComponent("P1", "test_pin", (0, 0)),)
+    assert optimized.cuts == (StripboardCut(x=3, y=0),)
 
 
 def test_bridge_first_score_prefers_fewer_jumpers_over_narrower_width():
@@ -945,24 +998,24 @@ def test_bridge_first_score_prefers_fewer_jumpers_over_narrower_width():
         board=create_stripboard(3, 2),
         footprints=footprints,
         placements={
-            "P1": ("test_pin", (0, 0), 0),
-            "P2": ("test_pin", (1, 0), 0),
+            "P1": ("test_pin", (0, 1), 0),
+            "P2": ("test_pin", (0, 0), 0),
         },
-        jumpers=(((0, 1), (1, 1), "n"),),
+        jumpers=(((1, 1), (1, 0), "n"),),
     )
     wider_without_jumper = create_manual_stripboard_layout(
         circuit,
         board=create_stripboard(5, 2),
         footprints=footprints,
         placements={
-            "P1": ("test_pin", (0, 3), 0),
-            "P2": ("test_pin", (0, 4), 0),
+            "P1": ("test_pin", (3, 1), 0),
+            "P2": ("test_pin", (4, 1), 0),
         },
     )
-    narrow_report = verify_stripboard_layout(narrower_with_jumper, circuit)
+    nary_report = verify_stripboard_layout(narrower_with_jumper, circuit)
     wide_report = verify_stripboard_layout(wider_without_jumper, circuit)
 
-    assert narrow_report.ok, narrow_report.summary()
+    assert nary_report.ok, nary_report.summary()
     assert wide_report.ok, wide_report.summary()
     assert physical._routing_layout_score(
         wider_without_jumper,
@@ -971,7 +1024,7 @@ def test_bridge_first_score_prefers_fewer_jumpers_over_narrower_width():
         circuit,
     ) < physical._routing_layout_score(
         narrower_with_jumper,
-        narrow_report,
+        nary_report,
         physical._routing_zero_score(),
         circuit,
     )
@@ -1014,7 +1067,7 @@ def test_shake_orders_prioritize_bridge_net_transistor_and_neighbors():
     )
     hints = StripboardRoutingHints(
         component_order=("R1", "R2", "Q1"),
-        component_columns={"R1": 1, "R2": 2, "Q1": 3},
+        component_x={"R1": 1, "R2": 2, "Q1": 3},
     )
     layout = PhysicalLayout(
         board=create_stripboard(4, 4),
@@ -1079,8 +1132,8 @@ def test_plan_stripboard_uses_projection_hints_from_schema():
     assert isinstance(hints, StripboardRoutingHints)
     assert hints.board_width_pitches == 5
     assert hints.board_height_pitches == 3
-    assert hints.component_terminal_holes[("R1", "start")] == (0, 2)
-    assert hints.component_terminal_holes[("R2", "end")] == (2, 3)
+    assert hints.component_terminal_holes[("R1", "start")] == (2, 0)
+    assert hints.component_terminal_holes[("R2", "end")] == (3, 2)
     assert report.ok, report.summary()
     pins = {
         (pin.refdes, pin.terminal_name): pin.hole
@@ -1088,9 +1141,9 @@ def test_plan_stripboard_uses_projection_hints_from_schema():
     }
     assert layout.board.width_pitches < 8
     assert (
-        pins[("R1", "start")][0] == hints.component_terminal_holes[("R1", "start")][0]
+        pins[("R1", "start")][1] == hints.component_terminal_holes[("R1", "start")][1]
     )
-    assert pins[("R2", "end")][0] == hints.component_terminal_holes[("R2", "end")][0]
+    assert pins[("R2", "end")][1] == hints.component_terminal_holes[("R2", "end")][1]
 
 
 def test_plan_stripboard_routes_high_side_switch_with_jumpers_and_cuts():
@@ -1189,13 +1242,12 @@ def test_write_stripboard_build_outputs_writes_build_artifacts(tmp_path):
     circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
     layout = create_manual_stripboard_layout(
         circuit,
-        board=create_stripboard(5, 8),
+        board=create_stripboard(9, 1),
         placements={
             "R1": ((0, 0), 0),
-            "R2": ((4, 2), 90),
+            "R2": ((5, 0), 0),
         },
-        cuts=((0, 1),),
-        jumpers=(((0, 4), (4, 1), "midpoint"),),
+        cuts=((1, 0), (7, 0)),
     )
     report = verify_stripboard_layout(layout, circuit)
     assert report.ok, report.summary()
@@ -1230,12 +1282,12 @@ def test_write_stripboard_build_outputs_writes_build_artifacts(tmp_path):
     data = json.loads(outputs.data_json.read_text(encoding="utf-8"))
     assert data["verification"]["ok"] is True
     assert data["layout"]["board"] == {
-        "height_pitches": 8,
+        "height_pitches": 1,
         "pitch_mm": 2.54,
         "strip_direction": "horizontal",
-        "width_pitches": 5,
+        "width_pitches": 9,
     }
-    assert data["layout"]["metrics"]["total_holes"] == 40
+    assert data["layout"]["metrics"]["total_holes"] == 9
     assert data["layout"]["metrics"]["empty_holes"] >= 0
 
 
@@ -1260,7 +1312,7 @@ def test_tb6600_verified_stripboard_layout_is_readable_and_labeled(
     assert layout.board.height_pitches == 9
     assert len(layout.cuts) <= 4
     assert len(layout.jumpers) <= 1
-    assert physical._left_compaction_cut_blocker_collisions(layout) == frozenset()
+    assert physical._left_compaction_cut_blocker_xlisions(layout) == frozenset()
     assert all(jumper.net_name != "ena_plus" for jumper in layout.jumpers)
     assert all(jumper.net_name != "step_pul_minus" for jumper in layout.jumpers)
     _assert_jumper_endpoints_are_dedicated(layout, circuit)
@@ -1497,11 +1549,12 @@ def test_verify_stripboard_layout_reports_open_circuit():
     circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
     layout = create_manual_stripboard_layout(
         circuit,
-        board=create_stripboard(5, 8),
+        board=create_stripboard(9, 1),
         placements={
-            "R1": ((0, 0), 90),
-            "R2": ((4, 2), 90),
+            "R1": ((0, 0), 0),
+            "R2": ((5, 0), 0),
         },
+        cuts=((1, 0), (4, 0), (7, 0)),
     )
 
     report = verify_stripboard_layout(layout, circuit)
@@ -1515,10 +1568,10 @@ def test_verify_stripboard_layout_reports_short_circuit():
     circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
     layout = create_manual_stripboard_layout(
         circuit,
-        board=create_stripboard(5, 8),
+        board=create_stripboard(8, 1),
         placements={
             "R1": ((0, 0), 0),
-            "R2": ((4, 2), 90),
+            "R2": ((4, 0), 0),
         },
     )
 
@@ -1527,7 +1580,7 @@ def test_verify_stripboard_layout_reports_short_circuit():
     assert not report.ok
     assert "short_circuit" in {issue.code for issue in report.errors}
     assert any(
-        conductor.net_names == ("midpoint", "vcc")
+        conductor.net_names == ("gnd", "midpoint", "vcc")
         for conductor in report.physical_netlist.conductors
     )
 
@@ -1540,7 +1593,7 @@ def test_verify_stripboard_layout_reports_drc_without_raising():
             PlacedComponent("R1", "axial_2pin_span3", (0, 2), 0),
             PlacedComponent("R2", "axial_2pin_span3", (2, 0), 0),
         ),
-        cuts=(StripboardCut(row=2, col=0),),
+        cuts=(StripboardCut(x=0, y=2),),
         jumpers=(Jumper(start=(2, 0), end=(9, 9), net_name="ghost"),),
         blockers=(),
         footprints=default_footprints(),
@@ -1561,7 +1614,7 @@ def test_verify_stripboard_layout_reports_drc_without_raising():
         extract_physical_netlist(layout, circuit)
 
 
-def test_verify_stripboard_layout_reports_pin_and_blocker_collisions():
+def test_verify_stripboard_layout_reports_pin_and_blocker_xlisions():
     circuit = circuit_from_schema(create_voltage_divider(), name="manual_divider")
     layout = PhysicalLayout(
         board=create_stripboard(8, 4),
@@ -1571,7 +1624,7 @@ def test_verify_stripboard_layout_reports_pin_and_blocker_collisions():
         ),
         cuts=(),
         jumpers=(),
-        blockers=(StripboardBlocker(row=0, col=0, element_name="fixture"),),
+        blockers=(StripboardBlocker(x=0, y=0, element_name="fixture"),),
         footprints=default_footprints(),
     )
 
@@ -1579,8 +1632,8 @@ def test_verify_stripboard_layout_reports_pin_and_blocker_collisions():
 
     assert not report.ok
     assert {
-        "pin_hole_collision",
-        "blocker_pin_collision",
+        "pin_hole_xlision",
+        "blocker_pin_xlision",
     }.issubset({issue.code for issue in report.errors})
 
 
@@ -1647,8 +1700,8 @@ def _directional_pins(layout, circuit):
 def _assert_jumper_endpoints_are_dedicated(layout, circuit):
     pin_holes = {pin.hole for pin in placed_component_pins(layout, circuit)}
     connector_holes = {connector.hole for connector in layout.connectors}
-    cut_holes = {(cut.row, cut.col) for cut in layout.cuts}
-    blocker_holes = {(blocker.row, blocker.col) for blocker in layout.blockers}
+    cut_holes = {(cut.x, cut.y) for cut in layout.cuts}
+    blocker_holes = {(blocker.x, blocker.y) for blocker in layout.blockers}
     used_jumper_holes = set()
     for jumper in layout.jumpers:
         for hole in (jumper.start, jumper.end):
@@ -1683,10 +1736,10 @@ def test_manual_layout_rejects_jumper_endpoint_on_component_pin():
             circuit,
             board=create_stripboard(8, 4),
             placements={
-                "R1": ((0, 0), 0),
-                "R2": ((2, 0), 0),
+                "R1": ((0, 3), 0),
+                "R2": ((0, 1), 0),
             },
-            jumpers=(((0, 3), (2, 4), "midpoint"),),
+            jumpers=(((3, 3), (4, 1), "midpoint"),),
         )
 
 
@@ -1698,10 +1751,10 @@ def test_manual_layout_rejects_connector_on_component_pin():
             circuit,
             board=create_stripboard(8, 4),
             placements={
-                "R1": ((0, 0), 0),
-                "R2": ((2, 0), 0),
+                "R1": ((0, 3), 0),
+                "R2": ((0, 1), 0),
             },
-            connectors=(("J1", "vcc", (0, 0), "VCC"),),
+            connectors=(("J1", "vcc", (0, 3), "VCC"),),
         )
 
 
