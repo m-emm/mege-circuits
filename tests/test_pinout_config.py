@@ -170,6 +170,78 @@ discrete_view:
     assert project.discrete_view.anchor_labels == {"A01_LEFT": "pin 1"}
 
 
+def test_load_pinout_config_normalizes_shared_boxes(tmp_path: Path):
+    config_path = tmp_path / "box.yaml"
+    config_path.write_text(
+        """
+pins:
+  LEFT: [0, 0]
+  RIGHT: [1, 0]
+boxes:
+  - id: driver
+    label: |
+      TMC5160T Plus
+      64 x 57 mm
+    top_left: [4, 3]
+    size_pitches: [25.1968503937, 22.4409448819]
+wires:
+  - from: LEFT
+    to: RIGHT
+""".strip(),
+        encoding="utf-8",
+    )
+
+    project = load_pinout_config(config_path)
+
+    assert len(project.boxes) == 1
+    assert project.boxes[0].id == "driver"
+    assert project.boxes[0].label == "TMC5160T Plus\n64 x 57 mm"
+    assert project.boxes[0].top_left == (4.0, 3.0)
+    assert project.boxes[0].size_pitches == pytest.approx((64 / 2.54, 57 / 2.54))
+
+
+@pytest.mark.parametrize(
+    ("box_yaml", "message"),
+    [
+        (
+            "{id: driver, label: Driver, top_left: [0, 0], " "size_pitches: [0, 2]}",
+            "size_pitches values must be > 0",
+        ),
+        (
+            "{id: driver, label: Driver, top_left: [0, 0], " "size_pitches: [.nan, 2]}",
+            "coordinates and size must be finite",
+        ),
+        (
+            "{id: driver, label: Driver, top_left: [0, 0], "
+            "size_pitches: [2, 2], color: red}",
+            "Unknown boxes",
+        ),
+    ],
+)
+def test_load_pinout_config_rejects_invalid_shared_boxes(
+    tmp_path: Path,
+    box_yaml: str,
+    message: str,
+):
+    config_path = tmp_path / "invalid_box.yaml"
+    config_path.write_text(
+        f"""
+pins:
+  LEFT: [0, 0]
+  RIGHT: [1, 0]
+boxes:
+  - {box_yaml}
+wires:
+  - from: LEFT
+    to: RIGHT
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        load_pinout_config(config_path)
+
+
 @pytest.mark.parametrize(
     ("extra_yaml", "message"),
     [

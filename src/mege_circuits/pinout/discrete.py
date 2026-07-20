@@ -12,6 +12,7 @@ from mege_circuits.pinout.config import (
 from mege_circuits.pinout.svg import (
     _calculate_bounds,
     _circle_bbox,
+    _draw_pinout_boxes,
     _estimate_text_bbox,
     _line_bbox,
     _SvgBounds,
@@ -684,7 +685,9 @@ def generate_discrete_top_svg(project: PinoutProject) -> str:
     pin_numbers = project.discrete_pin_numbers or {}
     view = project.discrete_view
 
-    min_x, min_y, max_x, max_y = _calculate_bounds(project.pin_positions, None)
+    min_x, min_y, max_x, max_y = _calculate_bounds(
+        project.pin_positions, None, project.boxes
+    )
     transformed_positions, _ = _transform_positions_for_view(
         project.pin_positions,
         None,
@@ -722,6 +725,20 @@ def generate_discrete_top_svg(project: PinoutProject) -> str:
         },
     )
     bounds = _SvgBounds()
+
+    _draw_pinout_boxes(
+        root,
+        bounds,
+        project.boxes,
+        min_x=min_x,
+        min_y=min_y,
+        max_x=max_x,
+        max_y=max_y,
+        coord_shift_x=coord_shift_x,
+        coord_shift_y=coord_shift_y,
+        grid_size=GRID_SIZE,
+        flip_x=False,
+    )
 
     for discrete_group in view.groups:
         group_pins = [
@@ -828,8 +845,18 @@ def generate_discrete_top_svg(project: PinoutProject) -> str:
 
     pin_xs = [point[0] for point in screen_positions.values()]
     pin_ys = [point[1] for point in screen_positions.values()]
-    title_x = (min(pin_xs) + max(pin_xs)) / 2.0
-    title_y = min(pin_ys) - 54.0
+    if project.boxes:
+        layout_left = (min_x + coord_shift_x) * GRID_SIZE
+        layout_top = (min_y + coord_shift_y) * GRID_SIZE
+        layout_right = (max_x + coord_shift_x) * GRID_SIZE
+        layout_bottom = (max_y + coord_shift_y) * GRID_SIZE
+        title_x = (layout_left + layout_right) / 2.0
+        title_y = layout_top - 54.0
+    else:
+        layout_left = min(pin_xs)
+        layout_bottom = max(pin_ys)
+        title_x = (min(pin_xs) + max(pin_xs)) / 2.0
+        title_y = min(pin_ys) - 54.0
     _add_text(
         root,
         bounds,
@@ -855,8 +882,8 @@ def generate_discrete_top_svg(project: PinoutProject) -> str:
 
     if view.notes_text:
         note_lines = view.notes_text.splitlines()
-        note_x = min(pin_xs)
-        note_y = max(pin_ys) + 55.0
+        note_x = layout_left
+        note_y = layout_bottom + 55.0
         note_width = max(len(line) for line in note_lines) * 9 * 0.58 + 20
         note_height = len(note_lines) * 15 + 18
         note_rect = (

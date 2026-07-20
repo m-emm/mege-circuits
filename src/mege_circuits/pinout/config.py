@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,16 @@ class DiscretePinGroup:
 
 
 @dataclass(frozen=True)
+class PinoutBox:
+    """Shared physical outline drawn in every pinout view."""
+
+    id: str
+    label: str
+    top_left: tuple[float, float]
+    size_pitches: tuple[float, float]
+
+
+@dataclass(frozen=True)
 class DiscreteViewConfig:
     """Presentation settings for a component-placement top view."""
 
@@ -56,6 +67,7 @@ class PinoutProject:
     discrete_pin_numbers: dict[str, str] | None = None
     component_placements: tuple[DiscreteComponentPlacement, ...] = ()
     discrete_view: DiscreteViewConfig | None = None
+    boxes: tuple[PinoutBox, ...] = ()
 
 
 def _as_xy(value: Any, *, context: str) -> tuple[float, float]:
@@ -330,6 +342,54 @@ def _normalize_component_placements(
     return tuple(placements)
 
 
+def _normalize_boxes(raw_boxes: Any) -> tuple[PinoutBox, ...]:
+    if raw_boxes is None:
+        return ()
+    if not isinstance(raw_boxes, list) or not raw_boxes:
+        raise ValueError("boxes must be a non-empty list")
+
+    boxes = []
+    box_ids = set()
+    for index, raw_box in enumerate(raw_boxes):
+        context = f"boxes[{index}]"
+        if not isinstance(raw_box, dict):
+            raise ValueError(f"{context} must be a mapping")
+        unknown_keys = sorted(
+            set(raw_box) - {"id", "label", "top_left", "size_pitches"}
+        )
+        if unknown_keys:
+            raise ValueError(f"Unknown {context} keys: {unknown_keys}")
+
+        box_id = str(raw_box.get("id", "")).strip()
+        label = str(raw_box.get("label", "")).strip()
+        if not box_id:
+            raise ValueError(f"{context}.id is required")
+        if box_id in box_ids:
+            raise ValueError(f"Duplicate box id: {box_id}")
+        box_ids.add(box_id)
+        if not label:
+            raise ValueError(f"{context}.label is required")
+
+        top_left = _as_xy(raw_box.get("top_left"), context=f"{context}.top_left")
+        size_pitches = _as_xy(
+            raw_box.get("size_pitches"), context=f"{context}.size_pitches"
+        )
+        if not all(math.isfinite(value) for value in (*top_left, *size_pitches)):
+            raise ValueError(f"{context} coordinates and size must be finite")
+        if size_pitches[0] <= 0 or size_pitches[1] <= 0:
+            raise ValueError(f"{context}.size_pitches values must be > 0")
+
+        boxes.append(
+            PinoutBox(
+                id=box_id,
+                label=label,
+                top_left=top_left,
+                size_pitches=size_pitches,
+            )
+        )
+    return tuple(boxes)
+
+
 def _normalize_discrete_view(
     raw_view: Any,
     *,
@@ -509,6 +569,7 @@ def load_pinout_config(config_path: str | Path) -> PinoutProject:
         pin_sets=pin_sets,
         has_component_placements=bool(component_placements),
     )
+    boxes = _normalize_boxes(data.get("boxes"))
 
     color_map = dict(DEFAULT_COLOR_MAP)
     raw_color_map = data.get("color_map", {})
@@ -540,4 +601,5 @@ def load_pinout_config(config_path: str | Path) -> PinoutProject:
         discrete_pin_numbers=discrete_pin_numbers,
         component_placements=component_placements,
         discrete_view=discrete_view,
+        boxes=boxes,
     )

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from xml.etree import ElementTree as ET
+
+if TYPE_CHECKING:
+    from mege_circuits.pinout.config import PinoutBox
 
 DEFAULT_COLOR_MAP = {
     "power": "red",
@@ -96,6 +99,7 @@ def _estimate_annotation_width_px(
 def _calculate_bounds(
     pin_positions: dict[str, tuple[float, float]],
     waypoint_solutions: dict[int, dict[str, Any]] | None,
+    boxes: tuple[PinoutBox, ...] = (),
 ) -> tuple[float, float, float, float]:
     coords = list(pin_positions.values())
     max_x = max(x for x, _ in coords)
@@ -110,6 +114,14 @@ def _calculate_bounds(
             max_y = max(max_y, max(y for _, y in waypoint_coords))
             min_x = min(min_x, min(x for x, _ in waypoint_coords))
             min_y = min(min_y, min(y for _, y in waypoint_coords))
+
+    for box in boxes:
+        box_left, box_top = box.top_left
+        box_width, box_height = box.size_pitches
+        min_x = min(min_x, box_left)
+        max_x = max(max_x, box_left + box_width)
+        min_y = min(min_y, box_top - box_height)
+        max_y = max(max_y, box_top)
 
     return min_x, min_y, max_x, max_y
 
@@ -139,6 +151,89 @@ def _transform_positions_for_view(
             transformed_waypoints[conn_idx] = (transformed_wp_x, transformed_wp_y)
 
     return transformed_pins, transformed_waypoints
+
+
+def _draw_pinout_boxes(
+    root: ET.Element,
+    svg_bounds: _SvgBounds,
+    boxes: tuple[PinoutBox, ...],
+    *,
+    min_x: float,
+    min_y: float,
+    max_x: float,
+    max_y: float,
+    coord_shift_x: float,
+    coord_shift_y: float,
+    grid_size: float,
+    flip_x: bool,
+) -> None:
+    for box in boxes:
+        box_left, box_top = box.top_left
+        box_width, box_height = box.size_pitches
+        box_right = box_left + box_width
+        box_bottom = box_top - box_height
+
+        transformed_left = max_x - box_right + min_x if flip_x else box_left
+        transformed_right = max_x - box_left + min_x if flip_x else box_right
+        transformed_top = max_y - box_top + min_y
+        transformed_bottom = max_y - box_bottom + min_y
+
+        left = (transformed_left + coord_shift_x) * grid_size
+        right = (transformed_right + coord_shift_x) * grid_size
+        top = (transformed_top + coord_shift_y) * grid_size
+        bottom = (transformed_bottom + coord_shift_y) * grid_size
+        rect = (left, top, right, bottom)
+        svg_bounds.add_rect(rect)
+        ET.SubElement(
+            root,
+            "rect",
+            {
+                "class": "pinout-box",
+                "data-box": box.id,
+                "data-width-pitches": f"{box_width:.12g}",
+                "data-height-pitches": f"{box_height:.12g}",
+                "x": f"{left:.12g}",
+                "y": f"{top:.12g}",
+                "width": f"{right - left:.12g}",
+                "height": f"{bottom - top:.12g}",
+                "rx": "8",
+                "fill": "#e2e8f0",
+                "fill-opacity": "0.22",
+                "stroke": "#475569",
+                "stroke-width": "3",
+            },
+        )
+
+        label_lines = box.label.splitlines()
+        center_x = (left + right) / 2.0
+        center_y = (top + bottom) / 2.0
+        first_y = center_y - ((len(label_lines) - 1) * 9.0)
+        for line_index, line in enumerate(label_lines):
+            label_y = first_y + line_index * 18.0
+            svg_bounds.add_rect(
+                _estimate_text_bbox(
+                    line,
+                    x=center_x,
+                    y=label_y,
+                    font_size=12.0,
+                    text_anchor="middle",
+                )
+            )
+            _add_text(
+                root,
+                line,
+                x=f"{center_x:.12g}",
+                y=f"{label_y:.12g}",
+                **{
+                    "class": "pinout-box-label",
+                    "data-box": box.id,
+                    "font-size": "12px",
+                    "font-family": "sans-serif",
+                    "font-weight": "bold" if line_index == 0 else "normal",
+                    "text-anchor": "middle",
+                    "fill": "#334155",
+                },
+            )
 
 
 def _add_text(parent: ET.Element, content: str, **attrs: str) -> None:
@@ -391,6 +486,7 @@ def generate_routed_svg(
     connections: list[dict[str, Any]],
     waypoint_solutions: dict[int, dict[str, Any]] | None,
     *,
+    boxes: tuple[PinoutBox, ...] = (),
     flip_x: bool = False,
     version_label: str | None = None,
     notes_text: str | None = None,
@@ -405,7 +501,9 @@ def generate_routed_svg(
     if color_map:
         merged_color_map.update(color_map)
 
-    min_x, min_y, max_x, max_y = _calculate_bounds(pin_positions, waypoint_solutions)
+    min_x, min_y, max_x, max_y = _calculate_bounds(
+        pin_positions, waypoint_solutions, boxes
+    )
     actual_pin_positions, actual_waypoints = _transform_positions_for_view(
         pin_positions,
         waypoint_solutions,
@@ -446,6 +544,20 @@ def generate_routed_svg(
         },
     )
     svg_bounds = _SvgBounds()
+
+    _draw_pinout_boxes(
+        root,
+        svg_bounds,
+        boxes,
+        min_x=min_x,
+        min_y=min_y,
+        max_x=max_x,
+        max_y=max_y,
+        coord_shift_x=coord_shift_x,
+        coord_shift_y=coord_shift_y,
+        grid_size=grid_size,
+        flip_x=flip_x,
+    )
 
     for i, connection in enumerate(connections):
         p1 = actual_pin_positions[connection["from"]]

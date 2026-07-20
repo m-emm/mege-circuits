@@ -4,7 +4,7 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
-from mege_circuits.pinout.config import load_pinout_config
+from mege_circuits.pinout.config import PinoutBox, load_pinout_config
 from mege_circuits.pinout.discrete import generate_discrete_top_svg
 from mege_circuits.pinout.svg import _estimate_text_bbox, generate_routed_svg
 
@@ -120,12 +120,58 @@ def test_generate_routed_svg_auto_fits_left_edge_labels():
         assert bbox[3] <= viewbox_bottom
 
 
+def test_generate_routed_svg_draws_and_mirrors_shared_boxes():
+    pin_positions = {
+        "LEFT": (0.0, 0.0),
+        "RIGHT": (1.0, 0.0),
+    }
+    box = PinoutBox(
+        id="driver",
+        label="TMC5160T Plus\n64 x 57 mm",
+        top_left=(4.0, 3.0),
+        size_pitches=(64 / 2.54, 57 / 2.54),
+    )
+
+    top_svg = generate_routed_svg(
+        pin_positions,
+        [],
+        {},
+        boxes=(box,),
+        flip_x=False,
+    )
+    bottom_svg = generate_routed_svg(
+        pin_positions,
+        [],
+        {},
+        boxes=(box,),
+        flip_x=True,
+    )
+    top_root = ET.fromstring(top_svg)
+    bottom_root = ET.fromstring(bottom_svg)
+    top_box = top_root.find(f"{SVG_NAMESPACE}rect[@class='pinout-box']")
+    bottom_box = bottom_root.find(f"{SVG_NAMESPACE}rect[@class='pinout-box']")
+
+    assert top_box is not None
+    assert bottom_box is not None
+    assert float(top_box.attrib["width"]) == pytest.approx((64 / 2.54) * 40)
+    assert float(top_box.attrib["height"]) == pytest.approx((57 / 2.54) * 40)
+    assert float(top_box.attrib["x"]) != float(bottom_box.attrib["x"])
+    assert top_svg.count('data-box="driver"') == 3
+    assert "TMC5160T Plus" in top_svg
+    assert "64 x 57 mm" in bottom_svg
+
+
 def test_generate_discrete_top_svg_draws_components_without_wiring(tmp_path):
     config_path = tmp_path / "discrete.yaml"
     config_path.write_text(
         """
 metadata:
   version_label: test placement
+boxes:
+  - id: driver
+    label: Driver outline
+    top_left: [7, 3]
+    size_pitches: [2, 2]
 pin_sets:
   - id: left
     prefix: A
@@ -189,6 +235,8 @@ discrete_view:
     root = ET.fromstring(svg_content)
 
     assert 'class="discrete-background"' in svg_content
+    assert 'class="pinout-box"' in svg_content
+    assert 'data-box="driver"' in svg_content
     assert 'data-component="R1"' in svg_content
     assert 'data-component="DZ1"' in svg_content
     assert 'data-component="Q1"' in svg_content

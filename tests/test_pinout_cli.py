@@ -70,6 +70,11 @@ def test_pinout_cli_adds_discrete_top_view_when_placements_exist(tmp_path: Path)
     config_path.write_text(
         """
 basename: cli_discrete
+boxes:
+  - id: module
+    label: Module outline
+    top_left: [3, 2]
+    size_pitches: [2, 2]
 pin_sets:
   - id: row
     origin: [0, 0]
@@ -101,4 +106,11 @@ discrete_view:
         encoding="utf-8"
     )
     assert 'data-component="R1"' in discrete_svg
+    assert 'data-box="module"' in discrete_svg
     assert "Test row" in discrete_svg
+    assert 'data-box="module"' in (output_dir / "cli_discrete_top.svg").read_text(
+        encoding="utf-8"
+    )
+    assert 'data-box="module"' in (output_dir / "cli_discrete_bottom.svg").read_text(
+        encoding="utf-8"
+    )

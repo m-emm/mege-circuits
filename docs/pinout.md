@@ -88,6 +88,14 @@ pins:
   compass_scl: [20, 3]
   compass_sda: [20, 2]
 
+boxes:
+  - id: compass_module
+    label: |
+      Compass module
+      physical outline
+    top_left: [18, 6]
+    size_pitches: [6, 5]
+
 wires:
   - from: xiao_3v3
     to: compass_vcc
@@ -138,6 +146,10 @@ discrete_view:
   - `discrete_pin_numbers` (optional): integer `start` and `step` used for
     compact contact labels in the discrete view
 - `pins` (optional): explicit pin coordinate map, `name: [x, y]`
+- `boxes` (optional): physical outlines rendered behind wiring in every view
+  - `id` and `label` identify the outlined module; multi-line labels are allowed
+  - `top_left`: shared `[x, y]` coordinate in the pinout raster
+  - `size_pitches`: `[width, height]` in the same raster units
 - `wires` or `connections` (required): list of connections
   - `from`, `to` (required)
   - `type` or `kind` (optional): color-map key, default `default`

@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
-from .config import load_pinout_config
+from .config import PinoutBox, load_pinout_config
 from .discrete import generate_discrete_top_svg
 from .routing import route_problematic_connections
 from .svg import SvgMarginsPx, generate_routed_svg, write_svg
@@ -67,12 +67,14 @@ def _write_view(
     version_label: str | None,
     notes_text: str | None,
     svg_margins_px: SvgMarginsPx,
+    boxes: tuple[PinoutBox, ...],
     flip_x: bool,
 ) -> Path:
     svg_content = generate_routed_svg(
         pin_positions,
         connections,
         waypoint_solutions,
+        boxes=boxes,
         flip_x=flip_x,
         version_label=version_label,
         notes_text=notes_text,
@@ -115,6 +117,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 version_label=project.version_label,
                 notes_text=project.notes_text,
                 svg_margins_px=project.svg_margins_px,
+                boxes=project.boxes,
                 flip_x=False,
             )
         )
@@ -139,6 +142,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 version_label=project.version_label,
                 notes_text=project.notes_text,
                 svg_margins_px=project.svg_margins_px,
+                boxes=project.boxes,
                 flip_x=True,
             )
         )

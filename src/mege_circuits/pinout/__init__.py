@@ -4,6 +4,7 @@ from .config import (
     DiscreteComponentPlacement,
     DiscretePinGroup,
     DiscreteViewConfig,
+    PinoutBox,
     PinoutProject,
     load_pinout_config,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "DiscreteComponentPlacement",
     "DiscretePinGroup",
     "DiscreteViewConfig",
+    "PinoutBox",
     "PinoutProject",
     "analyze_all_connections",
     "analyze_connection_violations",
