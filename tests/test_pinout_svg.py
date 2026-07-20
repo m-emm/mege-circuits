@@ -1,6 +1,11 @@
+import math
 import re
 from xml.etree import ElementTree as ET
 
+import pytest
+
+from mege_circuits.pinout.config import load_pinout_config
+from mege_circuits.pinout.discrete import generate_discrete_top_svg
 from mege_circuits.pinout.svg import _estimate_text_bbox, generate_routed_svg
 
 SVG_NAMESPACE = "{http://www.w3.org/2000/svg}"
@@ -113,3 +118,124 @@ def test_generate_routed_svg_auto_fits_left_edge_labels():
         assert bbox[1] >= viewbox_y
         assert bbox[2] <= viewbox_right
         assert bbox[3] <= viewbox_bottom
+
+
+def test_generate_discrete_top_svg_draws_components_without_wiring(tmp_path):
+    config_path = tmp_path / "discrete.yaml"
+    config_path.write_text(
+        """
+metadata:
+  version_label: test placement
+pin_sets:
+  - id: left
+    prefix: A
+    origin: [0, 2]
+    direction: down
+    discrete_pin_numbers: {start: 1, step: 1}
+    pins: ["01", "02", "03"]
+  - id: right
+    prefix: A
+    origin: [3, 2]
+    direction: down
+    discrete_pin_numbers: {start: 6, step: -1}
+    pins: ["06", "05", "04"]
+wires:
+  - from: A01
+    to: A06
+component_placements:
+  - ref: R1
+    kind: resistor
+    value: 10k
+    terminals: {start: A01, end: A06}
+  - ref: DZ1
+    kind: zener
+    value: 3V3
+    terminals: {anode: A05, cathode: A02}
+  - ref: Q1
+    kind: bjt_pnp
+    value: BC327 PNP
+    terminals: {collector: A03, base: A04, emitter: A05}
+discrete_view:
+  title: Placement test
+  notes: K is the cathode band.
+  groups:
+    - id: socket
+      label: Socket A
+      pin_sets: [left, right]
+  anchor_labels: {A01: pin 1}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    # Q1 intentionally cannot share A05 with DZ1; use a second project with
+    # distinct pins after first proving the placement validator does its job.
+    with pytest.raises(ValueError, match="occupied by both"):
+        load_pinout_config(config_path)
+
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        .replace(
+            "terminals: {collector: A03, base: A04, emitter: A05}",
+            "terminals: {collector: B01, base: B02, emitter: B03}",
+        )
+        .replace(
+            "wires:\n  - from: A01",
+            "pins:\n  B01: [5, 2]\n  B02: [5, 1]\n  B03: [5, 0]\nwires:\n  - from: A01",
+        ),
+        encoding="utf-8",
+    )
+    project = load_pinout_config(config_path)
+    svg_content = generate_discrete_top_svg(project)
+    root = ET.fromstring(svg_content)
+
+    assert 'class="discrete-background"' in svg_content
+    assert 'data-component="R1"' in svg_content
+    assert 'data-component="DZ1"' in svg_content
+    assert 'data-component="Q1"' in svg_content
+    assert 'class="cathode-band"' in svg_content
+    assert 'class="transistor-terminal-label"' in svg_content
+    assert 'class="discrete-pin-group"' in svg_content
+    assert 'data-pin="A01"' in svg_content
+    assert "Placement test" in svg_content
+    assert "K is the cathode band." in svg_content
+    assert not root.findall(f"{SVG_NAMESPACE}polyline[@class='wire']")
+
+    pin_positions = {
+        node.attrib["data-pin"]: (
+            float(node.attrib["cx"]),
+            float(node.attrib["cy"]),
+        )
+        for node in root.iter(f"{SVG_NAMESPACE}circle")
+        if node.attrib.get("class") == "discrete-pin"
+    }
+    cathode_band = next(
+        node
+        for node in root.iter(f"{SVG_NAMESPACE}line")
+        if node.attrib.get("class") == "cathode-band"
+        and node.attrib.get("data-component") == "DZ1"
+    )
+    band_center = (
+        (float(cathode_band.attrib["x1"]) + float(cathode_band.attrib["x2"])) / 2.0,
+        (float(cathode_band.attrib["y1"]) + float(cathode_band.attrib["y2"])) / 2.0,
+    )
+    assert math.dist(band_center, pin_positions["A02"]) < math.dist(
+        band_center, pin_positions["A05"]
+    )
+
+    polarity_labels = {
+        node.attrib["data-terminal"]: (
+            node.text,
+            (float(node.attrib["x"]), float(node.attrib["y"])),
+        )
+        for node in root.iter(f"{SVG_NAMESPACE}text")
+        if node.attrib.get("class") == "polarity-label"
+        and node.attrib.get("data-component") == "DZ1"
+    }
+    assert polarity_labels["anode"][0] == "A"
+    assert polarity_labels["cathode"][0] == "K"
+    assert math.dist(polarity_labels["anode"][1], pin_positions["A05"]) < math.dist(
+        polarity_labels["anode"][1], pin_positions["A02"]
+    )
+    assert math.dist(polarity_labels["cathode"][1], pin_positions["A02"]) < math.dist(
+        polarity_labels["cathode"][1], pin_positions["A05"]
+    )

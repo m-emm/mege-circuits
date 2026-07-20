@@ -62,3 +62,43 @@ def test_pinout_demo_config_loads():
     assert any(
         connection["from"] == "PICO_GPIO_2" for connection in project.connections
     )
+
+
+def test_pinout_cli_adds_discrete_top_view_when_placements_exist(tmp_path: Path):
+    config_path = tmp_path / "discrete.yaml"
+    output_dir = tmp_path / "out"
+    config_path.write_text(
+        """
+basename: cli_discrete
+pin_sets:
+  - id: row
+    origin: [0, 0]
+    direction: right
+    pins: [LEFT, RIGHT]
+wires:
+  - from: LEFT
+    to: RIGHT
+component_placements:
+  - ref: R1
+    kind: resistor
+    value: 10k
+    terminals: {start: LEFT, end: RIGHT}
+discrete_view:
+  groups:
+    - id: row
+      label: Test row
+      pin_sets: [row]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    assert main([str(config_path), "-o", str(output_dir)]) == 0
+
+    assert (output_dir / "cli_discrete_top.svg").exists()
+    assert (output_dir / "cli_discrete_top_discrete.svg").exists()
+    assert (output_dir / "cli_discrete_bottom.svg").exists()
+    discrete_svg = (output_dir / "cli_discrete_top_discrete.svg").read_text(
+        encoding="utf-8"
+    )
+    assert 'data-component="R1"' in discrete_svg
+    assert "Test row" in discrete_svg

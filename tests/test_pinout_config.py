@@ -100,3 +100,124 @@ wires:
     project = load_pinout_config(config_path)
 
     assert project.svg_margins_px == (10.0, 20.0, 30.0, 40.0)
+
+
+def test_load_pinout_config_normalizes_discrete_placements_and_groups(
+    tmp_path: Path,
+):
+    config_path = tmp_path / "discrete.yaml"
+    config_path.write_text(
+        """
+pin_sets:
+  - id: socket_left
+    prefix: A
+    origin: [0, 1]
+    direction: down
+    discrete_pin_numbers: {start: 1, step: 1}
+    pins: [01_LEFT, 02_LEFT]
+  - id: socket_right
+    prefix: A
+    origin: [3, 1]
+    direction: down
+    discrete_pin_numbers: {start: 4, step: -1}
+    pins: [04_RIGHT, 03_RIGHT]
+wires:
+  - from: A01_LEFT
+    to: A04_RIGHT
+component_placements:
+  - ref: R1
+    kind: resistor
+    value: 10k
+    terminals: {start: A01_LEFT, end: A04_RIGHT}
+  - ref: D1
+    kind: diode
+    value: 1N4148
+    terminals: {anode: A02_LEFT, cathode: A03_RIGHT}
+discrete_view:
+  title: Assembly side
+  notes: Insert components, then flip the board.
+  groups:
+    - id: socket_a
+      label: Socket A
+      pin_sets: [socket_left, socket_right]
+  anchor_labels:
+    A01_LEFT: pin 1
+""".strip(),
+        encoding="utf-8",
+    )
+
+    project = load_pinout_config(config_path)
+
+    assert project.pin_sets == {
+        "socket_left": ("A01_LEFT", "A02_LEFT"),
+        "socket_right": ("A04_RIGHT", "A03_RIGHT"),
+    }
+    assert project.discrete_pin_numbers == {
+        "A01_LEFT": "1",
+        "A02_LEFT": "2",
+        "A04_RIGHT": "4",
+        "A03_RIGHT": "3",
+    }
+    assert [component.ref for component in project.component_placements] == [
+        "R1",
+        "D1",
+    ]
+    assert project.discrete_view is not None
+    assert project.discrete_view.groups[0].pin_sets == (
+        "socket_left",
+        "socket_right",
+    )
+    assert project.discrete_view.anchor_labels == {"A01_LEFT": "pin 1"}
+
+
+@pytest.mark.parametrize(
+    ("extra_yaml", "message"),
+    [
+        (
+            """
+  - ref: R2
+    kind: resistor
+    value: 22k
+    terminals: {start: LEFT, end: EXTRA}
+""",
+            "unknown pins",
+        ),
+        (
+            """
+  - ref: R2
+    kind: resistor
+    value: 22k
+    terminals: {start: LEFT, end: RIGHT}
+""",
+            "occupied by both",
+        ),
+    ],
+)
+def test_load_pinout_config_rejects_invalid_discrete_placements(
+    tmp_path: Path,
+    extra_yaml: str,
+    message: str,
+):
+    config_path = tmp_path / "invalid_discrete.yaml"
+    config_path.write_text(
+        (
+            """
+pins:
+  LEFT: [0, 0]
+  RIGHT: [1, 0]
+wires:
+  - from: LEFT
+    to: RIGHT
+component_placements:
+  - ref: R1
+    kind: resistor
+    value: 10k
+    terminals: {start: LEFT, end: RIGHT}
+"""
+            + extra_yaml
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        load_pinout_config(config_path)

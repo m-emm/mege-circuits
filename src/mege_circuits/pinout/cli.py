@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .config import load_pinout_config
+from .discrete import generate_discrete_top_svg
 from .routing import route_problematic_connections
 from .svg import SvgMarginsPx, generate_routed_svg, write_svg
 
@@ -15,7 +16,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mege-circuits-pinout",
         description=(
-            "Generate pinout SVG diagrams (top and underside views) from YAML/JSON config."
+            "Generate pinout SVG diagrams (top, optional discrete top, and "
+            "underside views) from YAML/JSON config."
         ),
     )
     parser.add_argument("config", help="Path to pinout config (.yaml/.yml/.json)")
@@ -116,6 +118,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 flip_x=False,
             )
         )
+        if project.component_placements:
+            output_paths.append(
+                write_svg(
+                    generate_discrete_top_svg(project),
+                    output_dir / f"{basename}_top_discrete.svg",
+                )
+            )
 
     if not args.top_only:
         output_paths.append(
