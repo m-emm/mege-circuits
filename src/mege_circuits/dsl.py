@@ -34,6 +34,9 @@ BJT_X = 0.752
 BJT_Y = 0.697
 DUAL_OPTOCOUPLER_HALF_WIDTH = 1.5
 DUAL_OPTOCOUPLER_HALF_HEIGHT = 2.4
+HEX_OPEN_COLLECTOR_HALF_WIDTH = 2.4
+HEX_OPEN_COLLECTOR_HALF_HEIGHT = 4.3
+HEX_OPEN_COLLECTOR_CHANNEL_YS = (3.0, 1.8, 0.6, -0.6, -1.8, -3.0)
 DEFAULT_ELEMENT_BBOX_PADDING = 0.35
 LABEL_GAP = 0.16
 EPS = 1e-9
@@ -89,6 +92,7 @@ class ElementType(Enum):
     BJT_PNP = auto()
     ZENER = auto()
     DUAL_OPTOCOUPLER = auto()
+    HEX_OPEN_COLLECTOR_BUFFER = auto()
 
 
 Dot = NodeType.DOT
@@ -103,6 +107,7 @@ BjtPnp = ElementType.BJT_PNP
 Wire = ElementType.WIRE
 Zener = ElementType.ZENER
 DualOptocoupler = ElementType.DUAL_OPTOCOUPLER
+HexOpenCollectorBuffer = ElementType.HEX_OPEN_COLLECTOR_BUFFER
 
 
 class Alignment(Enum):
@@ -312,6 +317,50 @@ class _DualOptocouplerSchematic(elm.ElementCompound):
                 self.anchors[f"{prefix}_{terminal}"] = getattr(channel, terminal)
 
 
+class _HexOpenCollectorBufferSchematic(elm.ElementCompound):
+    """Six non-inverting open-collector channels in one DIP-style package."""
+
+    _input_pins = (1, 3, 5, 9, 11, 13)
+    _output_pins = (2, 4, 6, 8, 10, 12)
+
+    def setup(self):
+        self.add(
+            elm.Rect(
+                corner1=(-2.0, -3.55),
+                corner2=(2.0, 3.55),
+                fill="none",
+            )
+        )
+        for channel, (y, input_pin, output_pin) in enumerate(
+            zip(
+                HEX_OPEN_COLLECTOR_CHANNEL_YS,
+                self._input_pins,
+                self._output_pins,
+            ),
+            start=1,
+        ):
+            self.add(elm.Line().at((-2.4, y)).to((-1.35, y)))
+            self.add(elm.Arrow().at((-1.35, y)).to((1.05, y)))
+            self.add(elm.Line().at((1.05, y)).to((2.4, y)))
+            self.add(
+                elm.Label(f"{input_pin}  {channel}A", fontsize=7).at((-1.7, y + 0.22))
+            )
+            self.add(
+                elm.Label(f"{channel}Y  {output_pin}", fontsize=7).at((1.65, y + 0.22))
+            )
+            self.add(elm.Label("OC", fontsize=7).at((0.65, y + 0.22)))
+            self.anchors[f"a{channel}"] = (-2.4, y)
+            self.anchors[f"y{channel}"] = (2.4, y)
+
+        self.add(elm.Line().at((0.0, 3.55)).to((0.0, 4.3)))
+        self.add(elm.Label("14  VCC", fontsize=7).at((0.4, 3.92)))
+        self.add(elm.Line().at((0.0, -3.55)).to((0.0, -4.3)))
+        self.add(elm.Label("7  GND", fontsize=7).at((0.4, -3.92)))
+        self.anchors["vcc"] = (0.0, 4.3)
+        self.anchors["gnd"] = (0.0, -4.3)
+        self.anchors["center"] = (0.0, 0.0)
+
+
 ELEMENT_SPECS = {
     Wire: _two_terminal_spec(elm.Line),
     Resistor: _two_terminal_spec(elm.Resistor),
@@ -395,6 +444,57 @@ ELEMENT_SPECS = {
             "b_cathode": "K2",
             "b_collector": "C2",
             "b_emitter": "E2",
+        },
+    ),
+    HexOpenCollectorBuffer: ElementSpec(
+        terminals=(
+            "vcc",
+            "gnd",
+            "a1",
+            "y1",
+            "a2",
+            "y2",
+            "a3",
+            "y3",
+            "a4",
+            "y4",
+            "a5",
+            "y5",
+            "a6",
+            "y6",
+        ),
+        local_anchors={
+            "vcc": (0.0, 4.3),
+            "gnd": (0.0, -4.3),
+            **{
+                terminal: position
+                for channel, y in enumerate(HEX_OPEN_COLLECTOR_CHANNEL_YS, start=1)
+                for terminal, position in (
+                    (f"a{channel}", (-2.4, y)),
+                    (f"y{channel}", (2.4, y)),
+                )
+            },
+        },
+        local_bbox=[
+            [-HEX_OPEN_COLLECTOR_HALF_WIDTH, -HEX_OPEN_COLLECTOR_HALF_HEIGHT],
+            [HEX_OPEN_COLLECTOR_HALF_WIDTH, HEX_OPEN_COLLECTOR_HALF_HEIGHT],
+        ],
+        schemdraw_factory=_HexOpenCollectorBufferSchematic,
+        terminal_labels={
+            "vcc": "14 VCC",
+            "gnd": "7 GND",
+            "a1": "1 1A",
+            "y1": "2 1Y",
+            "a2": "3 2A",
+            "y2": "4 2Y",
+            "a3": "5 3A",
+            "y3": "6 3Y",
+            "a4": "9 4A",
+            "y4": "8 4Y",
+            "a5": "11 5A",
+            "y5": "10 5Y",
+            "a6": "13 6A",
+            "y6": "12 6Y",
         },
     ),
 }
@@ -1378,7 +1478,13 @@ def _stripboard_element_y_spans(
 
 
 def _stripboard_element_span_weight(element_type):
-    if element_type in (BjtNpn, BjtPnp, PMos, DualOptocoupler):
+    if element_type in (
+        BjtNpn,
+        BjtPnp,
+        PMos,
+        DualOptocoupler,
+        HexOpenCollectorBuffer,
+    ):
         return 10
     if element_type in (Resistor, Fuse, Diode, Zener):
         return 3
@@ -1591,7 +1697,13 @@ def modify_label_alignment(element, alignment):
     return modified
 
 
-def render_schemdraw(schema, file, show=False, kind_color_map=None):
+def render_schemdraw(
+    schema,
+    file,
+    show=False,
+    kind_color_map=None,
+    background_color=None,
+):
     if Path(file).suffix.lower() != ".svg":
         schemdraw.use("matplotlib")
 
@@ -1605,7 +1717,12 @@ def render_schemdraw(schema, file, show=False, kind_color_map=None):
     }
 
     with schemdraw.Drawing(file=file, show=show) as drawing:
-        drawing.config(unit=2.0, inches_per_unit=0.55, fontsize=10)
+        drawing.config(
+            unit=2.0,
+            inches_per_unit=0.55,
+            fontsize=10,
+            bgcolor=background_color,
+        )
 
         for wire in schema.wires:
             start, end = _wire_endpoints(wire, node_points, node_views_by_name)

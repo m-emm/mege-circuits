@@ -10,7 +10,7 @@ engine.
 alignment-first schematic DSL, a Schemdraw renderer, a bare stripboard renderer,
 and a surprisingly capable diagnostic stripboard overlay. What is still
 half-baked is the electrical planning model underneath the stripboard view:
-today's layout is derived from schematic drawing positions and row compaction,
+today's layout is derived from schematic drawing positions and y compaction,
 not from an explicit circuit netlist routed onto a physical board.
 
 This document describes how to move from the current implementation to the
@@ -76,9 +76,9 @@ The current stripboard workflow, as used by
 ```python
 schema = create_schema_for_tb6600_interface()
 assignment = assign_schema_nets_to_stripboard(schema)
-assignment = compact_sparse_stripboard_rows(assignment, schema=schema)
+assignment = compact_sparse_stripboard_tracks(assignment, schema=schema)
 assignment = compact_stripboard_connections_left(schema, assignment, strict=True)
-assignment = permute_stripboard_rows_for_element_span(
+assignment = permute_stripboard_tracks_for_element_span(
     schema,
     assignment,
     priority_element_names=("Q1", "Q2", "Q3"),
@@ -90,11 +90,11 @@ That workflow is useful and tested. It can:
 
 ```text
 - group schematic markers by net,
-- assign nets to stripboard rows,
+- assign nets to stripboard ys,
 - compact sparse nets into cut-separated runs,
 - place terminal and node markers on distinct holes,
 - avoid component-body blockers,
-- reduce important component row spans by permuting rows,
+- reduce important component y spans by permuting ys,
 - render SVG and PNG stripboard overlays,
 - render cuts, run blocks, terminal dots, node dots, element body segments,
   net labels, component labels, and terminal labels,
@@ -170,7 +170,7 @@ parts that remain useful after routing improves:
 ```
 
 The renderer should be refactored toward a stable render input model, not thrown
-away. Existing `StripboardNetAssignment` rendering can remain as a legacy or
+away. Existing `StripboardNetAssignment` rendering can remain as an early
 diagnostic adapter while the future `PhysicalLayout` renderer comes online.
 
 ### Grid First, Millimetres Late
@@ -178,10 +178,13 @@ diagnostic adapter while the future `PhysicalLayout` renderer comes online.
 All stripboard planning should use integer grid coordinates:
 
 ```text
-row = 0 at the top of the rendered top view
-col = 0 at the left of the rendered top view
+origin = bottom-left in the public model
+x = 0 at the left of the top view
+y = 0 at the bottom of the top view
+x increases to the right
+y increases upward
 pitch = 2.54 mm by default
-horizontal stripboard = copper strips run along rows
+horizontal stripboard = copper strips run along x at fixed y
 ```
 
 Only renderers and exporters should convert grid coordinates into SVG units,
@@ -313,8 +316,8 @@ class PlacedComponent:
 
 @dataclass(frozen=True)
 class Cut:
-    row: int
-    col: int
+    y: int
+    x: int
 
 
 @dataclass(frozen=True)
@@ -327,7 +330,7 @@ class Jumper:
 The existing `Stripboard`, `StripboardCut`, and `StripboardBlocker` concepts
 can either be reused directly or migrated to these names gradually. The key is
 that the new layout model represents real physical pins and conductors, not
-only schematic markers snapped onto rows.
+only schematic markers snapped onto ys.
 
 ## Evolution Path
 
@@ -347,7 +350,7 @@ confusion while preserving the value of the tool.
 Good near-term cleanup:
 
 ```text
-- keep `assign_schema_nets_to_stripboard` as the legacy projection entry point,
+- keep `assign_schema_nets_to_stripboard` as the stripboard projection entry point,
 - keep `render_stripboard_overlay` compatible with `StripboardNetAssignment`,
 - add comments/docstrings that the assignment is visualization-derived,
 - keep all existing TB6600 projection tests as regression tests.
@@ -451,7 +454,7 @@ The first DRC set should include:
 ```
 
 This verification layer should know nothing about how the layout was produced.
-It should validate manual layouts, legacy projection adapters where meaningful,
+It should validate manual layouts, projection adapters where meaningful,
 and future routed layouts.
 
 Implementation status: this phase is now represented by
@@ -464,12 +467,12 @@ connected components remains a later renderer-adapter step.
 ### Phase 4: Route Onto Stripboard
 
 Only after extraction and verification exist should the project replace the
-row-per-net projection with a real planner.
+y-per-net projection with a real planner.
 
 The first router can still be conservative:
 
 ```text
-- use schematic positions and current projection rows as placement hints,
+- use schematic positions and current projection ys as placement hints,
 - place components on legal holes with footprints,
 - prefer existing strip runs for same-net pins,
 - insert cuts to isolate different nets sharing a strip,
@@ -484,19 +487,19 @@ get_schema_net_visualizations:
     placement hint extraction
 
 assign_schema_nets_to_stripboard:
-    legacy initial row hint / diagnostic projection
+    initial y hint / diagnostic projection
 
-compact_sparse_stripboard_rows:
-    hint for packing low-degree nets into shared rows
+compact_sparse_stripboard_tracks:
+    hint for packing low-degree nets into shared ys
 
 compact_stripboard_connections_left:
     component-marker compaction heuristic
 
-permute_stripboard_rows_for_element_span:
-    row-order scoring heuristic
+permute_stripboard_tracks_for_element_span:
+    y-order scoring heuristic
 
 render_stripboard_overlay:
-    legacy visualization and renderer compatibility target
+    visualization and renderer compatibility target
 ```
 
 The key behavioral change is that routing results must be accepted because
@@ -506,9 +509,9 @@ them.
 Implementation status: this phase now has a conservative first router through
 `plan_stripboard(...)`, `stripboard_hints_from_schema(...)`, and
 `score_stripboard_layout(...)` in `mege_circuits.physical`, exposed through
-`mege_circuits.simple`. The router now uses the compact legacy projection as
+`mege_circuits.simple`. The router now uses the compact stripboard projection as
 placement hints, searches legal footprint placements near projected terminal
-holes, inserts only the cuts needed to isolate same-row conflicts, adds
+holes, inserts only the cuts needed to isolate same-y conflicts, adds
 top-side jumpers for remaining open physical conductors, and accepts results
 only after `verify_stripboard_layout(...)` passes.
 
@@ -524,8 +527,8 @@ Once layouts verify, add build-oriented outputs:
 - machine-readable JSON for the circuit, layout, and verification report.
 ```
 
-The SVGs should remain inspectable: preserve `data-net`, `data-row`,
-`data-col`, `data-element`, and `data-terminal` attributes where practical.
+The SVGs should remain inspectable: preserve `data-net`, `data-y`,
+`data-x`, `data-element`, and `data-terminal` attributes where practical.
 
 Implementation status: this phase now has reusable build output helpers through
 `write_stripboard_build_outputs(...)`, `render_stripboard_bottom(...)`,
@@ -534,7 +537,7 @@ Implementation status: this phase now has reusable build output helpers through
 `mege_circuits.simple`. The TB6600 integration script uses these helpers to
 generate a verified top assembly, bottom cut view, connectivity debug view,
 Markdown checklist, and machine-readable JSON. The default top assembly view is
-now readable-first: components and jumpers are distinct, row labels sit outside
+now readable-first: components and jumpers are distinct, y labels sit outside
 the board, and each terminal label appears once at its physical hole; denser
 diagnostic information remains available through annotated/debug outputs.
 
@@ -827,4 +830,4 @@ not yet a verified stripboard compiler. The right evolution is incremental:
 
 That keeps the part of `mege-circuits` that already works well while replacing
 the fragile core assumption: stripboard layout should come from a semantic
-netlist routed onto physical copper, not from schematic drawing rows alone.
+netlist routed onto physical copper, not from schematic drawing ys alone.

@@ -104,18 +104,18 @@ projection preview. This path is intentionally visualization-derived: it reads
 the visible positions of every net in a `Schema`, sorts those nets by schematic
 y coordinate, assigns one full horizontal strip to each net, then overlays
 snapped node and terminal markers onto the hole grid. The board projection maps
-the schematic top to the first stripboard row, so a bottom ground rail stays at
-the bottom of the rendered stripboard. Horizontally, only columns with snapped
+the schematic top to the first stripboard y, so a bottom ground rail stays at
+the bottom of the rendered stripboard. Horizontally, only xs with snapped
 schematic node or terminal markers are kept; empty runs of holes between used
-columns are removed.
+xs are removed.
 
-Sparse rows can be compacted as a second pass. This keeps the initial
-one-net-per-row assignment intact, then merges rows with few connections into
+Sparse ys can be compacted as a second pass. This keeps the initial
+one-net-per-y assignment intact, then merges ys with few connections into
 cut-separated runs on shared physical strips:
 
 ```python
 assignment = assign_schema_nets_to_stripboard(schema)
-assignment = compact_sparse_stripboard_rows(
+assignment = compact_sparse_stripboard_tracks(
     assignment,
     min_run_holes=4,
     max_connections_per_sparse_net=3,
@@ -128,13 +128,13 @@ short run is kept only if strict component placement still succeeds. Without a
 schema, the pass performs the pure geometric compaction and treats all nets
 with up to three markers as sparse.
 
-After component placement, physical rows can be permuted without changing any
-hole columns. This is useful when solderability matters more than preserving
-the schematic-like row order:
+After component placement, physical ys can be permuted without changing any
+hole xs. This is useful when solderability matters more than preserving
+the schematic-like y order:
 
 ```python
 assignment = compact_stripboard_connections_left(schema, assignment, strict=True)
-assignment = permute_stripboard_rows_for_element_span(
+assignment = permute_stripboard_tracks_for_element_span(
     schema,
     assignment,
     priority_element_names=("Q1", "Q2", "Q3"),
@@ -221,6 +221,9 @@ The helper runs the script with the repository `src/` directory on
   on the output filename extension.
 
 Supported node types are `Dot` and `Ground`. Supported element types are
-`Wire`, `Resistor`, `Fuse`, `Capacitor`, `PMos`, `BjtNpn`, and `Zener`.
+`Wire`, `Resistor`, `Fuse`, `Capacitor`, `Diode`, `Zener`, `PMos`, `BjtNpn`,
+`BjtPnp`, and `DualOptocoupler`. `DualOptocoupler` exposes separate
+`a_*` and `b_*` anode, cathode, collector, and emitter terminals inside one
+aligned package outline.
 
 See `ALIGNMENT_BASED_SCHEMDRAW.md` for the design notes behind the DSL.

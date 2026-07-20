@@ -27,6 +27,7 @@ from mege_circuits.simple import (
     ERCIssue,
     ERCReport,
     Ground,
+    HexOpenCollectorBuffer,
     Resistor,
     Stripboard,
     StripboardBlocker,
@@ -371,6 +372,52 @@ def test_extended_analog_elements_render_with_stable_terminals(tmp_path):
     assert optocoupler.b_emitter.position == pytest.approx(
         (1.2016666666666664, -2.046666666666667)
     )
+
+
+def test_hex_open_collector_buffer_renders_with_dip_pin_terminals(tmp_path):
+    terminal_names = (
+        "vcc",
+        "gnd",
+        "a1",
+        "y1",
+        "a2",
+        "y2",
+        "a3",
+        "y3",
+        "a4",
+        "y4",
+        "a5",
+        "y5",
+        "a6",
+        "y6",
+    )
+    terminal_nodes = {
+        terminal: create_node(
+            Dot,
+            f"buffer_{terminal}",
+            net=create_net(f"buffer_{terminal}"),
+        )
+        for terminal in terminal_names
+    }
+    buffer = create_element(
+        HexOpenCollectorBuffer,
+        "U1",
+        "SN7407N",
+        **terminal_nodes,
+    )
+    schema = create_schema(list(terminal_nodes.values()), [buffer])
+    outfile = tmp_path / "hex_open_collector_buffer.svg"
+
+    render_schemdraw(schema, file=outfile, background_color="#ffffff")
+    circuit = circuit_from_schema(schema)
+
+    assert outfile.exists()
+    assert "fill: #ffffff" in outfile.read_text(encoding="utf-8")
+    assert circuit.components[0].kind == "hex_open_collector_buffer"
+    assert buffer.vcc.position == pytest.approx((0.0, 4.3))
+    assert buffer.gnd.position == pytest.approx((0.0, -4.3))
+    assert buffer.a1.position == pytest.approx((-2.4, 3.0))
+    assert buffer.y6.position == pytest.approx((2.4, -3.0))
 
 
 @pytest.mark.slow
