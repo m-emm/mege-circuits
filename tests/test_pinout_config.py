@@ -262,6 +262,11 @@ pin_sets:
     origin: [0, 4]
     direction: right
     pins: [DIAG0, DIAG1]
+  - id: auxiliary_line
+    prefix: AUX_
+    origin: [15, 0]
+    direction: up
+    pins: [ONE, TWO]
 boxes:
   - id: driver
     label: Driver
@@ -273,6 +278,10 @@ physical_components:
     component_type: stepstick_adapter
     pin_sets: [adapter_j1, adapter_j2, adapter_top]
     downholder: none
+  - id: auxiliary_line
+    component_type: pin_line
+    pin_sets: [auxiliary_line]
+    downholder: pin_line_clamp
   - id: driver
     component_type: boxed_module
     pin_sets: []
@@ -288,7 +297,7 @@ wires:
 
     project = load_pinout_config(config_path)
 
-    adapter, driver = project.physical_components
+    adapter, auxiliary_line, driver = project.physical_components
     assert adapter.id == "adapter"
     assert adapter.label == "StepStick adapter"
     assert adapter.component_type == "stepstick_adapter"
@@ -296,6 +305,9 @@ wires:
     assert adapter.through_pin_sets == adapter.pin_sets
     assert adapter.downholder is PinoutDownholderKind.NONE
     assert adapter.box_id is None
+    assert auxiliary_line.component_type == "pin_line"
+    assert auxiliary_line.pin_sets == ("auxiliary_line",)
+    assert auxiliary_line.downholder is PinoutDownholderKind.PIN_LINE_CLAMP
     assert driver.pin_sets == ()
     assert driver.through_pin_sets == ()
     assert driver.box_id == "driver"

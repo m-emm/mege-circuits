@@ -175,7 +175,7 @@ discrete_view:
   - `through_pin_sets` (optional): subset whose contacts pass through the
     carrier; omission means all listed `pin_sets`, while `[]` means none
   - `downholder` (required): semantic retention kind: `corner`,
-    `center_strip`, or `none`
+    `center_strip`, `pin_line_clamp`, or `none`
   - `box` (optional): existing `boxes.id` providing the component's exact
     raster outline
 - `wires` or `connections` (required): list of connections
@@ -225,3 +225,10 @@ dimensions, screw sizes, and printable clearances belong to the consuming
 assembly's parameter set. The pinout owns only component grouping, semantic
 type and holder choice, through-contact roles, exact raster coordinates, and
 box dimensions.
+
+`pin_line_clamp` identifies a single in-line header which needs a rigid clamp
+or retaining feature. The contact count and direction come from its pin set;
+the consuming assembly owns the header-body, slot, clamp, and clearance
+dimensions. This makes short connector rows and longer general-purpose
+wire-wrap rows use the same neutral physical topology without embedding a
+particular printable clamp design in the pinout.
