@@ -5,6 +5,8 @@ from .config import (
     DiscretePinGroup,
     DiscreteViewConfig,
     PinoutBox,
+    PinoutDownholderKind,
+    PinoutPhysicalComponent,
     PinoutProject,
     load_pinout_config,
 )
@@ -25,6 +27,8 @@ __all__ = [
     "DiscretePinGroup",
     "DiscreteViewConfig",
     "PinoutBox",
+    "PinoutDownholderKind",
+    "PinoutPhysicalComponent",
     "PinoutProject",
     "analyze_all_connections",
     "analyze_connection_violations",

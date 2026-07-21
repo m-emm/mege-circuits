@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from mege_circuits.pinout.config import load_pinout_config
+from mege_circuits.pinout.config import PinoutDownholderKind, load_pinout_config
 
 
 def test_load_pinout_config_rejects_duplicate_pin_coordinates(tmp_path: Path):
@@ -235,6 +235,223 @@ wires:
   - from: LEFT
     to: RIGHT
 """.strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        load_pinout_config(config_path)
+
+
+def test_load_pinout_config_normalizes_physical_components(tmp_path: Path):
+    config_path = tmp_path / "physical_components.yaml"
+    config_path.write_text(
+        """
+pin_sets:
+  - id: adapter_j1
+    prefix: J1_
+    origin: [0, 0]
+    direction: right
+    pins: [EN, STEP]
+  - id: adapter_j2
+    prefix: J2_
+    origin: [0, 2]
+    direction: right
+    pins: [VM, VIO]
+  - id: adapter_top
+    prefix: TOP_
+    origin: [0, 4]
+    direction: right
+    pins: [DIAG0, DIAG1]
+boxes:
+  - id: driver
+    label: Driver
+    top_left: [4, 5]
+    size_pitches: [8, 6]
+physical_components:
+  - id: adapter
+    label: StepStick adapter
+    component_type: stepstick_adapter
+    pin_sets: [adapter_j1, adapter_j2, adapter_top]
+    downholder: none
+  - id: driver
+    component_type: boxed_module
+    pin_sets: []
+    through_pin_sets: []
+    box: driver
+    downholder: none
+wires:
+  - from: J1_EN
+    to: J1_STEP
+""".strip(),
+        encoding="utf-8",
+    )
+
+    project = load_pinout_config(config_path)
+
+    adapter, driver = project.physical_components
+    assert adapter.id == "adapter"
+    assert adapter.label == "StepStick adapter"
+    assert adapter.component_type == "stepstick_adapter"
+    assert adapter.pin_sets == ("adapter_j1", "adapter_j2", "adapter_top")
+    assert adapter.through_pin_sets == adapter.pin_sets
+    assert adapter.downholder is PinoutDownholderKind.NONE
+    assert adapter.box_id is None
+    assert driver.pin_sets == ()
+    assert driver.through_pin_sets == ()
+    assert driver.box_id == "driver"
+
+
+def test_pinout_physical_component_types_are_exported_through_simple():
+    from mege_circuits.simple import PinoutDownholderKind as ExportedDownholderKind
+    from mege_circuits.simple import (
+        PinoutPhysicalComponent as ExportedPhysicalComponent,
+    )
+
+    assert ExportedDownholderKind is PinoutDownholderKind
+    assert ExportedPhysicalComponent.__name__ == "PinoutPhysicalComponent"
+
+
+@pytest.mark.parametrize(
+    ("physical_components_yaml", "message"),
+    [
+        (
+            """
+  - id: duplicate
+    component_type: header
+    pin_sets: [header_left]
+    downholder: none
+  - id: duplicate
+    component_type: header
+    pin_sets: [header_right]
+    downholder: none
+""",
+            "Duplicate physical component id",
+        ),
+        (
+            """
+  - id: unknown-pin-set
+    component_type: header
+    pin_sets: [missing]
+    downholder: none
+""",
+            "references unknown pin_sets",
+        ),
+        (
+            """
+  - id: first-owner
+    component_type: header
+    pin_sets: [header_left]
+    downholder: none
+  - id: second-owner
+    component_type: header
+    pin_sets: [header_left]
+    downholder: none
+""",
+            "may belong to only one component",
+        ),
+        (
+            """
+  - id: invalid-through-set
+    component_type: header
+    pin_sets: [header_left]
+    through_pin_sets: [header_right]
+    downholder: none
+""",
+            "through_pin_sets must be a subset",
+        ),
+        (
+            """
+  - id: unknown-box
+    component_type: boxed_module
+    pin_sets: []
+    box: missing
+    downholder: none
+""",
+            "references unknown box",
+        ),
+        (
+            """
+  - id: unsupported-holder
+    component_type: header
+    pin_sets: [header_left]
+    downholder: elastic_band
+""",
+            "downholder must be one of",
+        ),
+        (
+            """
+  - id: no-layout-source
+    component_type: header
+    pin_sets: []
+    downholder: none
+""",
+            "requires at least one pin_set or a box",
+        ),
+        (
+            """
+  - id: no-component-type
+    component_type: ""
+    pin_sets: [header_left]
+    downholder: none
+""",
+            "component_type is required",
+        ),
+        (
+            """
+  - id: mechanical-leak
+    component_type: header
+    pin_sets: [header_left]
+    downholder: none
+    thickness_mm: 3
+""",
+            "Unknown physical_components",
+        ),
+        (
+            """
+  - id: malformed-through-set
+    component_type: header
+    pin_sets: [header_left]
+    through_pin_sets: header_left
+    downholder: none
+""",
+            "through_pin_sets must be a list",
+        ),
+    ],
+)
+def test_load_pinout_config_rejects_invalid_physical_components(
+    tmp_path: Path,
+    physical_components_yaml: str,
+    message: str,
+):
+    config_path = tmp_path / "invalid_physical_components.yaml"
+    config_path.write_text(
+        (
+            """
+pin_sets:
+  - id: header_left
+    prefix: LEFT_
+    origin: [0, 0]
+    direction: right
+    pins: [A, B]
+  - id: header_right
+    prefix: RIGHT_
+    origin: [0, 2]
+    direction: right
+    pins: [A, B]
+boxes:
+  - id: known
+    label: Known box
+    top_left: [4, 4]
+    size_pitches: [2, 2]
+physical_components:
+"""
+            + physical_components_yaml
+            + """
+wires:
+  - from: LEFT_A
+    to: LEFT_B
+"""
+        ).strip(),
         encoding="utf-8",
     )
 

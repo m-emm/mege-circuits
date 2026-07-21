@@ -96,6 +96,20 @@ boxes:
     top_left: [18, 6]
     size_pitches: [6, 5]
 
+physical_components:
+  - id: xiao
+    label: XIAO module
+    component_type: xiao_2x7
+    pin_sets: [xiao_left, xiao_right]
+    downholder: corner
+  - id: compass
+    label: Compass module
+    component_type: boxed_module
+    pin_sets: []
+    through_pin_sets: []
+    box: compass_module
+    downholder: none
+
 wires:
   - from: xiao_3v3
     to: compass_vcc
@@ -150,6 +164,20 @@ discrete_view:
   - `id` and `label` identify the outlined module; multi-line labels are allowed
   - `top_left`: shared `[x, y]` coordinate in the pinout raster
   - `size_pitches`: `[width, height]` in the same raster units
+- `physical_components` (optional): neutral physical topology for downstream
+  carrier or assembly generators
+  - `id` (required): unique component identity
+  - `label` (optional): non-empty human-readable name
+  - `component_type` (required): semantic key used by the consuming assembly to
+    select its separately supplied mechanical profile
+  - `pin_sets` (optional): pin sets belonging to this real component; defaults
+    to an empty list for a box-only component
+  - `through_pin_sets` (optional): subset whose contacts pass through the
+    carrier; omission means all listed `pin_sets`, while `[]` means none
+  - `downholder` (required): semantic retention kind: `corner`,
+    `center_strip`, or `none`
+  - `box` (optional): existing `boxes.id` providing the component's exact
+    raster outline
 - `wires` or `connections` (required): list of connections
   - `from`, `to` (required)
   - `type` or `kind` (optional): color-map key, default `default`
@@ -171,3 +199,29 @@ At least one of `pin_sets` or `pins` must be provided. Duplicate pin names,
 duplicate pin coordinates, and connections to unknown pins are rejected.
 Discrete placements additionally reject unknown terminals, unsupported component
 kinds, duplicate references, and multiple components occupying one contact.
+
+## Physical Component Topology
+
+`physical_components` identifies which pin sets form one real component. It is
+independent of `discrete_view.groups`: discrete groups are presentation aids,
+while physical components are neutral input for consumers such as a printed
+carrier generator.
+
+Each pin set may be owned by at most one physical component. Every referenced
+pin set and box must exist. A component must reference at least one pin set or
+one box. `through_pin_sets`, when present, must be a duplicate-free subset of
+that component's `pin_sets`.
+
+Omitting `through_pin_sets` is the normal case for a socket or header: every
+grouped contact needs a carrier hole. This also covers a StepStick adapter with
+two ordinary rows plus a separate `DIAG0`/`DIAG1` row—both diagnostic pins are
+physical through-pins even if one is electrically unused. Use an explicit
+empty list for a terminal row which belongs to a box-backed module but does not
+penetrate the carrier.
+
+The section deliberately contains no mechanical manufacturing parameters.
+Plate thickness, raster pitch in millimetres, component-body margins, holder
+dimensions, screw sizes, and printable clearances belong to the consuming
+assembly's parameter set. The pinout owns only component grouping, semantic
+type and holder choice, through-contact roles, exact raster coordinates, and
+box dimensions.

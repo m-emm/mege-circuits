@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,27 @@ class PinoutBox:
     size_pitches: tuple[float, float]
 
 
+class PinoutDownholderKind(str, Enum):
+    """Semantic retention choice for one physical pinout component."""
+
+    CORNER = "corner"
+    CENTER_STRIP = "center_strip"
+    NONE = "none"
+
+
+@dataclass(frozen=True)
+class PinoutPhysicalComponent:
+    """Pin-set ownership and retention semantics for one real component."""
+
+    id: str
+    component_type: str
+    pin_sets: tuple[str, ...]
+    through_pin_sets: tuple[str, ...]
+    downholder: PinoutDownholderKind
+    label: str | None = None
+    box_id: str | None = None
+
+
 @dataclass(frozen=True)
 class DiscreteViewConfig:
     """Presentation settings for a component-placement top view."""
@@ -68,6 +90,7 @@ class PinoutProject:
     component_placements: tuple[DiscreteComponentPlacement, ...] = ()
     discrete_view: DiscreteViewConfig | None = None
     boxes: tuple[PinoutBox, ...] = ()
+    physical_components: tuple[PinoutPhysicalComponent, ...] = ()
 
 
 def _as_xy(value: Any, *, context: str) -> tuple[float, float]:
@@ -390,6 +413,142 @@ def _normalize_boxes(raw_boxes: Any) -> tuple[PinoutBox, ...]:
     return tuple(boxes)
 
 
+def _normalize_physical_component_pin_sets(
+    raw_pin_sets: Any,
+    *,
+    context: str,
+) -> tuple[str, ...]:
+    if not isinstance(raw_pin_sets, list):
+        raise ValueError(f"{context} must be a list")
+
+    pin_sets = tuple(str(pin_set).strip() for pin_set in raw_pin_sets)
+    if any(not pin_set for pin_set in pin_sets):
+        raise ValueError(f"{context} values must not be empty")
+    if len(set(pin_sets)) != len(pin_sets):
+        raise ValueError(f"{context} must not contain duplicates")
+    return pin_sets
+
+
+def _normalize_physical_components(
+    raw_components: Any,
+    *,
+    pin_sets: dict[str, tuple[str, ...]],
+    boxes: tuple[PinoutBox, ...],
+) -> tuple[PinoutPhysicalComponent, ...]:
+    if raw_components is None:
+        return ()
+    if not isinstance(raw_components, list) or not raw_components:
+        raise ValueError("physical_components must be a non-empty list")
+
+    components = []
+    component_ids = set()
+    owned_pin_sets: dict[str, str] = {}
+    box_ids = {box.id for box in boxes}
+    allowed_keys = {
+        "id",
+        "label",
+        "component_type",
+        "pin_sets",
+        "through_pin_sets",
+        "downholder",
+        "box",
+    }
+
+    for index, raw_component in enumerate(raw_components):
+        context = f"physical_components[{index}]"
+        if not isinstance(raw_component, dict):
+            raise ValueError(f"{context} must be a mapping")
+
+        unknown_keys = sorted(set(raw_component) - allowed_keys)
+        if unknown_keys:
+            raise ValueError(f"Unknown {context} keys: {unknown_keys}")
+
+        component_id = str(raw_component.get("id", "")).strip()
+        if not component_id:
+            raise ValueError(f"{context}.id is required")
+        if component_id in component_ids:
+            raise ValueError(f"Duplicate physical component id: {component_id}")
+        component_ids.add(component_id)
+
+        component_type = str(raw_component.get("component_type", "")).strip()
+        if not component_type:
+            raise ValueError(f"{context}.component_type is required")
+
+        raw_label = raw_component.get("label")
+        label = str(raw_label).strip() if raw_label is not None else None
+        if label == "":
+            raise ValueError(f"{context}.label must not be empty")
+
+        component_pin_sets = _normalize_physical_component_pin_sets(
+            raw_component.get("pin_sets", []),
+            context=f"{context}.pin_sets",
+        )
+        unknown_pin_sets = sorted(set(component_pin_sets) - set(pin_sets))
+        if unknown_pin_sets:
+            raise ValueError(
+                f"{context} references unknown pin_sets: {unknown_pin_sets}"
+            )
+
+        reused_pin_sets = sorted(set(component_pin_sets) & set(owned_pin_sets))
+        if reused_pin_sets:
+            ownership = ", ".join(
+                f"{pin_set} ({owned_pin_sets[pin_set]})" for pin_set in reused_pin_sets
+            )
+            raise ValueError(
+                f"Physical pin sets may belong to only one component: {ownership}"
+            )
+        for pin_set in component_pin_sets:
+            owned_pin_sets[pin_set] = component_id
+
+        if "through_pin_sets" in raw_component:
+            through_pin_sets = _normalize_physical_component_pin_sets(
+                raw_component["through_pin_sets"],
+                context=f"{context}.through_pin_sets",
+            )
+        else:
+            through_pin_sets = component_pin_sets
+        non_component_through_pin_sets = sorted(
+            set(through_pin_sets) - set(component_pin_sets)
+        )
+        if non_component_through_pin_sets:
+            raise ValueError(
+                f"{context}.through_pin_sets must be a subset of pin_sets: "
+                f"{non_component_through_pin_sets}"
+            )
+
+        raw_box_id = raw_component.get("box")
+        box_id = str(raw_box_id).strip() if raw_box_id is not None else None
+        if box_id == "":
+            raise ValueError(f"{context}.box must not be empty")
+        if box_id is not None and box_id not in box_ids:
+            raise ValueError(f"{context} references unknown box: {box_id}")
+        if not component_pin_sets and box_id is None:
+            raise ValueError(f"{context} requires at least one pin_set or a box")
+
+        downholder_text = str(raw_component.get("downholder", "")).strip().lower()
+        try:
+            downholder = PinoutDownholderKind(downholder_text)
+        except ValueError as error:
+            allowed_downholders = [kind.value for kind in PinoutDownholderKind]
+            raise ValueError(
+                f"{context}.downholder must be one of {allowed_downholders}"
+            ) from error
+
+        components.append(
+            PinoutPhysicalComponent(
+                id=component_id,
+                label=label,
+                component_type=component_type,
+                pin_sets=component_pin_sets,
+                through_pin_sets=through_pin_sets,
+                downholder=downholder,
+                box_id=box_id,
+            )
+        )
+
+    return tuple(components)
+
+
 def _normalize_discrete_view(
     raw_view: Any,
     *,
@@ -559,6 +718,12 @@ def load_pinout_config(config_path: str | Path) -> PinoutProject:
     if unknown_pins:
         raise ValueError(f"Connections reference unknown pins: {unknown_pins}")
 
+    boxes = _normalize_boxes(data.get("boxes"))
+    physical_components = _normalize_physical_components(
+        data.get("physical_components"),
+        pin_sets=pin_sets,
+        boxes=boxes,
+    )
     component_placements = _normalize_component_placements(
         data.get("component_placements"),
         pin_positions=pin_positions,
@@ -569,8 +734,6 @@ def load_pinout_config(config_path: str | Path) -> PinoutProject:
         pin_sets=pin_sets,
         has_component_placements=bool(component_placements),
     )
-    boxes = _normalize_boxes(data.get("boxes"))
-
     color_map = dict(DEFAULT_COLOR_MAP)
     raw_color_map = data.get("color_map", {})
     if raw_color_map:
@@ -602,4 +765,5 @@ def load_pinout_config(config_path: str | Path) -> PinoutProject:
         component_placements=component_placements,
         discrete_view=discrete_view,
         boxes=boxes,
+        physical_components=physical_components,
     )
