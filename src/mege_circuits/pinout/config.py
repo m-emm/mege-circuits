@@ -48,7 +48,9 @@ class PinoutDownholderKind(str, Enum):
 
     CORNER = "corner"
     CENTER_STRIP = "center_strip"
+    PERIMETER_FRAME = "perimeter_frame"
     PIN_LINE_CLAMP = "pin_line_clamp"
+    PIN_LINE_UPHOLDER = "pin_line_upholder"
     NONE = "none"
 
 

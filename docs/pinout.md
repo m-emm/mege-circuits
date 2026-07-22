@@ -175,7 +175,8 @@ discrete_view:
   - `through_pin_sets` (optional): subset whose contacts pass through the
     carrier; omission means all listed `pin_sets`, while `[]` means none
   - `downholder` (required): semantic retention kind: `corner`,
-    `center_strip`, `pin_line_clamp`, or `none`
+    `center_strip`, `perimeter_frame`, `pin_line_clamp`,
+    `pin_line_upholder`, or `none`
   - `box` (optional): existing `boxes.id` providing the component's exact
     raster outline
 - `wires` or `connections` (required): list of connections

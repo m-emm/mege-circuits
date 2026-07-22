@@ -277,11 +277,11 @@ physical_components:
     label: StepStick adapter
     component_type: stepstick_adapter
     pin_sets: [adapter_j1, adapter_j2, adapter_top]
-    downholder: none
+    downholder: perimeter_frame
   - id: auxiliary_line
     component_type: pin_line
     pin_sets: [auxiliary_line]
-    downholder: pin_line_clamp
+    downholder: pin_line_upholder
   - id: driver
     component_type: boxed_module
     pin_sets: []
@@ -303,11 +303,11 @@ wires:
     assert adapter.component_type == "stepstick_adapter"
     assert adapter.pin_sets == ("adapter_j1", "adapter_j2", "adapter_top")
     assert adapter.through_pin_sets == adapter.pin_sets
-    assert adapter.downholder is PinoutDownholderKind.NONE
+    assert adapter.downholder is PinoutDownholderKind.PERIMETER_FRAME
     assert adapter.box_id is None
     assert auxiliary_line.component_type == "pin_line"
     assert auxiliary_line.pin_sets == ("auxiliary_line",)
-    assert auxiliary_line.downholder is PinoutDownholderKind.PIN_LINE_CLAMP
+    assert auxiliary_line.downholder is PinoutDownholderKind.PIN_LINE_UPHOLDER
     assert driver.pin_sets == ()
     assert driver.through_pin_sets == ()
     assert driver.box_id == "driver"
@@ -321,6 +321,43 @@ def test_pinout_physical_component_types_are_exported_through_simple():
 
     assert ExportedDownholderKind is PinoutDownholderKind
     assert ExportedPhysicalComponent.__name__ == "PinoutPhysicalComponent"
+
+
+@pytest.mark.parametrize(
+    "downholder_kind",
+    (
+        PinoutDownholderKind.PIN_LINE_CLAMP,
+        PinoutDownholderKind.PIN_LINE_UPHOLDER,
+    ),
+)
+def test_load_pinout_config_supports_both_pin_line_retention_kinds(
+    tmp_path: Path,
+    downholder_kind: PinoutDownholderKind,
+):
+    config_path = tmp_path / f"{downholder_kind.value}.yaml"
+    config_path.write_text(
+        f"""
+pin_sets:
+  - id: pin_line
+    prefix: LINE_
+    origin: [0, 0]
+    direction: up
+    pins: [ONE, TWO]
+physical_components:
+  - id: pin_line
+    component_type: pin_line
+    pin_sets: [pin_line]
+    downholder: {downholder_kind.value}
+wires:
+  - from: LINE_ONE
+    to: LINE_TWO
+""".strip(),
+        encoding="utf-8",
+    )
+
+    project = load_pinout_config(config_path)
+
+    assert project.physical_components[0].downholder is downholder_kind
 
 
 @pytest.mark.parametrize(
