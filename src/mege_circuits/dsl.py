@@ -37,6 +37,10 @@ DUAL_OPTOCOUPLER_HALF_HEIGHT = 2.4
 HEX_OPEN_COLLECTOR_HALF_WIDTH = 2.4
 HEX_OPEN_COLLECTOR_HALF_HEIGHT = 4.3
 HEX_OPEN_COLLECTOR_CHANNEL_YS = (3.0, 1.8, 0.6, -0.6, -1.8, -3.0)
+LINEAR_REGULATOR_HALF_WIDTH = 1.5
+LINEAR_REGULATOR_BODY_HALF_WIDTH = 1.0
+LINEAR_REGULATOR_BODY_HALF_HEIGHT = 0.7
+LINEAR_REGULATOR_GROUND_Y = -1.6
 DEFAULT_ELEMENT_BBOX_PADDING = 0.35
 LABEL_GAP = 0.16
 EPS = 1e-9
@@ -93,6 +97,7 @@ class ElementType(Enum):
     ZENER = auto()
     DUAL_OPTOCOUPLER = auto()
     HEX_OPEN_COLLECTOR_BUFFER = auto()
+    LINEAR_REGULATOR = auto()
 
 
 Dot = NodeType.DOT
@@ -108,6 +113,7 @@ Wire = ElementType.WIRE
 Zener = ElementType.ZENER
 DualOptocoupler = ElementType.DUAL_OPTOCOUPLER
 HexOpenCollectorBuffer = ElementType.HEX_OPEN_COLLECTOR_BUFFER
+LinearRegulator = ElementType.LINEAR_REGULATOR
 
 
 class Alignment(Enum):
@@ -361,6 +367,47 @@ class _HexOpenCollectorBufferSchematic(elm.ElementCompound):
         self.anchors["center"] = (0.0, 0.0)
 
 
+class _LinearRegulatorSchematic(elm.ElementCompound):
+    """Three-terminal linear regulator with horizontal power flow."""
+
+    def setup(self):
+        self.add(
+            elm.Rect(
+                corner1=(
+                    -LINEAR_REGULATOR_BODY_HALF_WIDTH,
+                    -LINEAR_REGULATOR_BODY_HALF_HEIGHT,
+                ),
+                corner2=(
+                    LINEAR_REGULATOR_BODY_HALF_WIDTH,
+                    LINEAR_REGULATOR_BODY_HALF_HEIGHT,
+                ),
+                fill="none",
+            )
+        )
+        self.add(
+            elm.Line()
+            .at((-LINEAR_REGULATOR_HALF_WIDTH, 0.0))
+            .to((-LINEAR_REGULATOR_BODY_HALF_WIDTH, 0.0))
+        )
+        self.add(
+            elm.Line()
+            .at((LINEAR_REGULATOR_BODY_HALF_WIDTH, 0.0))
+            .to((LINEAR_REGULATOR_HALF_WIDTH, 0.0))
+        )
+        self.add(
+            elm.Line()
+            .at((0.0, -LINEAR_REGULATOR_BODY_HALF_HEIGHT))
+            .to((0.0, LINEAR_REGULATOR_GROUND_Y))
+        )
+        self.add(elm.Label("IN", fontsize=8).at((-0.65, 0.0)))
+        self.add(elm.Label("OUT", fontsize=8).at((0.6, 0.0)))
+        self.add(elm.Label("GND", fontsize=7).at((0.42, -1.15)))
+        self.anchors["input"] = (-LINEAR_REGULATOR_HALF_WIDTH, 0.0)
+        self.anchors["output"] = (LINEAR_REGULATOR_HALF_WIDTH, 0.0)
+        self.anchors["ground"] = (0.0, LINEAR_REGULATOR_GROUND_Y)
+        self.anchors["center"] = (0.0, 0.0)
+
+
 ELEMENT_SPECS = {
     Wire: _two_terminal_spec(elm.Line),
     Resistor: _two_terminal_spec(elm.Resistor),
@@ -496,6 +543,23 @@ ELEMENT_SPECS = {
             "a6": "13 6A",
             "y6": "12 6Y",
         },
+    ),
+    LinearRegulator: ElementSpec(
+        terminals=("input", "ground", "output"),
+        local_anchors={
+            "input": (-LINEAR_REGULATOR_HALF_WIDTH, 0.0),
+            "ground": (0.0, LINEAR_REGULATOR_GROUND_Y),
+            "output": (LINEAR_REGULATOR_HALF_WIDTH, 0.0),
+        },
+        local_bbox=[
+            [-LINEAR_REGULATOR_HALF_WIDTH, LINEAR_REGULATOR_GROUND_Y],
+            [
+                LINEAR_REGULATOR_HALF_WIDTH,
+                LINEAR_REGULATOR_BODY_HALF_HEIGHT,
+            ],
+        ],
+        schemdraw_factory=_LinearRegulatorSchematic,
+        terminal_labels={"input": "IN", "ground": "GND", "output": "OUT"},
     ),
 }
 

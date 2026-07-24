@@ -1,5 +1,13 @@
 """Pinout diagram generation with routing and SVG export."""
 
+from .catalog import (
+    ComponentCatalog,
+    DeviceDefinition,
+    DevicePinout,
+    InventoryDefinition,
+    PackageDefinition,
+    load_component_catalog,
+)
 from .config import (
     DiscreteComponentPlacement,
     DiscretePinGroup,
@@ -23,9 +31,14 @@ from .svg import DEFAULT_COLOR_MAP, generate_routed_svg, write_svg
 
 __all__ = [
     "DEFAULT_COLOR_MAP",
+    "ComponentCatalog",
+    "DeviceDefinition",
+    "DevicePinout",
     "DiscreteComponentPlacement",
     "DiscretePinGroup",
     "DiscreteViewConfig",
+    "InventoryDefinition",
+    "PackageDefinition",
     "PinoutBox",
     "PinoutDownholderKind",
     "PinoutPhysicalComponent",
@@ -36,6 +49,7 @@ __all__ = [
     "find_optimal_waypoint",
     "generate_discrete_top_svg",
     "generate_routed_svg",
+    "load_component_catalog",
     "load_pinout_config",
     "point_to_line_distance",
     "route_problematic_connections",

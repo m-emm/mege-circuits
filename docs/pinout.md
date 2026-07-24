@@ -186,11 +186,17 @@ discrete_view:
 - `component_placements` (optional): components installed on the top side
   - `ref`, `kind`, and `value` are required
   - `terminals` maps semantic terminal names to existing pins
-  - supported kinds are `resistor`, `capacitor`, `diode`, `zener`, `bjt_pnp`,
-    and `dip`
+  - supported kinds are `resistor`, `capacitor`, `diode`, `zener`, `bjt_npn`,
+    `bjt_pnp`, `voltage_regulator`, `to92`, and `dip`
   - resistors/capacitors use `start`/`end`; diodes/zener diodes use
-    `anode`/`cathode`; PNP transistors use `collector`/`base`/`emitter`; DIP
-    packages use consecutive numeric terminals `1..N`
+    `anode`/`cathode`; NPN and PNP transistors use
+    `collector`/`base`/`emitter`; voltage regulators use
+    `input`/`ground`/`output`; generic TO-92 packages use
+    `pin1`/`pin2`/`pin3`; DIP packages use consecutive numeric terminals `1..N`
+  - `bjt_npn` and `voltage_regulator` require a catalog `part`; an optional
+    `pinout_variant` selects a documented non-default mapping
+  - generic `to92` is the low-level escape hatch for uncataloged parts; it
+    intentionally keeps numbered terminals instead of guessing semantics
 - `discrete_view` (optional): presentation for `_top_discrete.svg`
   - `title` and `notes` provide assembly-specific annotations
   - `groups` name and outline one or more pin sets
@@ -200,6 +206,57 @@ At least one of `pin_sets` or `pins` must be provided. Duplicate pin names,
 duplicate pin coordinates, and connections to unknown pins are rejected.
 Discrete placements additionally reject unknown terminals, unsupported component
 kinds, duplicate references, and multiple components occupying one contact.
+
+## Component Catalog and TO-92 Orientation
+
+`mege_circuits.pinout/component_catalog.yaml` is installed with the package. It
+keeps physical package conventions separate from device semantics and records
+the Whadda K/TRANS1 assortment plus the received UTC LP2950L-3.3.
+
+Use evidence in this order:
+
+1. exact device marking on the received component;
+2. its manufacturer datasheet;
+3. semantic electrical nets in the pinout YAML;
+4. generated SVGs only as output to inspect.
+
+For TO-92, the normalized assembly convention looks at the marked flat face
+with leads pointing down and numbers the leads `1, 2, 3` from left to right.
+The renderer maps semantic terminals through the selected catalog pinout and
+places the curved body on the package-defined side of that numbered lead row.
+Changing a pinout variant changes the physical package orientation without
+renaming or rewiring semantic terminals.
+
+For example:
+
+```yaml
+component_placements:
+  - ref: Q1
+    kind: bjt_npn
+    part: BC337
+    value: BC337
+    terminals:
+      collector: socket_collector
+      base: socket_base
+      emitter: socket_emitter
+    # Use only after identifying an E-B-C manufacturer variant:
+    # pinout_variant: ebc
+
+  - ref: U3
+    kind: voltage_regulator
+    part: UTC_LP2950L_33_T92
+    value: LP2950L-3.3
+    terminals:
+      output: socket_output
+      ground: socket_ground
+      input: socket_input
+```
+
+BC337 and BC327 deliberately default to C-B-E for assembly drawings while
+retaining documented E-B-C alternatives. The K/TRANS1 supplier listing does
+not identify the semiconductor manufacturer, so verify those received parts
+before insertion. The catalog does not infer pinouts from an older generated
+diagram.
 
 ## Physical Component Topology
 

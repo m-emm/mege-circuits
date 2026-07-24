@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from .catalog import load_component_catalog
 from .svg import DEFAULT_COLOR_MAP, DEFAULT_SVG_MARGINS_PX, SvgMarginsPx
 
 
@@ -22,6 +23,8 @@ class DiscreteComponentPlacement:
     kind: str
     value: str
     terminals: dict[str, str]
+    part: str | None = None
+    pinout_variant: str | None = None
 
 
 @dataclass(frozen=True)
@@ -277,8 +280,13 @@ _DISCRETE_TERMINALS_BY_KIND = {
     "capacitor": frozenset(("start", "end")),
     "diode": frozenset(("anode", "cathode")),
     "zener": frozenset(("anode", "cathode")),
+    "bjt_npn": frozenset(("collector", "base", "emitter")),
     "bjt_pnp": frozenset(("collector", "base", "emitter")),
+    "voltage_regulator": frozenset(("input", "ground", "output")),
+    "to92": frozenset(("pin1", "pin2", "pin3")),
 }
+
+_CATALOG_BACKED_DISCRETE_KINDS = frozenset(("bjt_npn", "voltage_regulator"))
 
 
 def _normalize_component_placements(
@@ -294,15 +302,28 @@ def _normalize_component_placements(
     placements = []
     refs = set()
     occupied_pins: dict[str, str] = {}
+    component_catalog = load_component_catalog()
     for index, raw_placement in enumerate(raw_placements):
         context = f"component_placements[{index}]"
         if not isinstance(raw_placement, dict):
             raise ValueError(f"{context} must be a mapping")
+        unknown_keys = sorted(
+            set(raw_placement)
+            - {"ref", "kind", "value", "terminals", "part", "pinout_variant"}
+        )
+        if unknown_keys:
+            raise ValueError(f"Unknown {context} keys: {unknown_keys}")
 
         ref = str(raw_placement.get("ref", "")).strip()
         kind = str(raw_placement.get("kind", "")).strip().lower()
         value = str(raw_placement.get("value", "")).strip()
         raw_terminals = raw_placement.get("terminals")
+        raw_part = raw_placement.get("part")
+        part = str(raw_part).strip() if raw_part is not None else None
+        raw_pinout_variant = raw_placement.get("pinout_variant")
+        pinout_variant = (
+            str(raw_pinout_variant).strip() if raw_pinout_variant is not None else None
+        )
         if not ref:
             raise ValueError(f"{context}.ref is required")
         if ref in refs:
@@ -314,6 +335,32 @@ def _normalize_component_placements(
             raise ValueError(f"{context}.value is required")
         if not isinstance(raw_terminals, dict) or not raw_terminals:
             raise ValueError(f"{context}.terminals must be a non-empty mapping")
+        if part == "":
+            raise ValueError(f"{context}.part must not be empty")
+        if pinout_variant == "":
+            raise ValueError(f"{context}.pinout_variant must not be empty")
+        if kind in _CATALOG_BACKED_DISCRETE_KINDS:
+            if part is None:
+                raise ValueError(f"{context}.part is required for {kind}")
+            device = component_catalog.resolve_device(part)
+            if device.kind != kind:
+                raise ValueError(
+                    f"{context}.kind {kind!r} does not match catalog part "
+                    f"{device.id} kind {device.kind!r}"
+                )
+            if device.package != "TO-92":
+                raise ValueError(
+                    f"{context}.part {device.id} uses unsupported package "
+                    f"{device.package!r}; catalog-backed {kind} rendering "
+                    "currently supports TO-92"
+                )
+            device.resolve_pinout(pinout_variant)
+            part = device.id
+        elif part is not None or pinout_variant is not None:
+            raise ValueError(
+                f"{context}.part and pinout_variant are supported only for "
+                f"{sorted(_CATALOG_BACKED_DISCRETE_KINDS)}"
+            )
 
         terminals = {
             str(terminal_name): str(pin_name)
@@ -363,6 +410,8 @@ def _normalize_component_placements(
                 kind=kind,
                 value=value,
                 terminals=terminals,
+                part=part,
+                pinout_variant=pinout_variant,
             )
         )
     return tuple(placements)

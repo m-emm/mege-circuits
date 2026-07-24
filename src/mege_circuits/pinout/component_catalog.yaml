@@ -1,0 +1,191 @@
+catalog_version: 1
+
+# Assembly convention for package drawings:
+# - look at the marked/flat face of the component;
+# - hold the leads pointing down;
+# - read lead numbers from left to right.
+packages:
+  TO-92:
+    marked_face: flat
+    marked_face_lead_order: [1, 2, 3]
+    leads_direction: down
+    body_side: right_of_pin1_to_pin3
+  TO-126:
+    marked_face: flat
+    marked_face_lead_order: [1, 2, 3]
+    leads_direction: down
+    body_side: right_of_pin1_to_pin3
+
+sources:
+  whadda_k_trans1:
+    title: Whadda K/TRANS1 transistor set, 100 pieces, 8 values
+    url: https://www.velleman.eu/products/view/transistor-set-100-pcs-8-values-k-trans1/?id=361798&lang=en
+  onsemi_bc547b:
+    title: onsemi BC546B/BC547A/B/C/BC548B/C datasheet
+    url: https://www.onsemi.com/download/data-sheet/pdf/bc550-d.pdf
+  onsemi_bc557b:
+    title: onsemi BC556B/BC557A/B/C/BC558B/C datasheet
+    url: https://www.onsemi.com/download/data-sheet/pdf/bc556b-d.pdf
+  onsemi_bc337:
+    title: onsemi BC337 datasheet
+    url: https://www.onsemi.com/download/data-sheet/pdf/bc337-fsc-d.pdf
+  onsemi_bc327:
+    title: onsemi BC327 datasheet
+    url: https://www.onsemi.com/pdf/datasheet/bc327-d.pdf
+  nexperia_bc337:
+    title: Nexperia BC817/BC817W/BC337 datasheet
+    url: https://assets.nexperia.com/documents/data-sheet/BC817_BC817W_BC337.pdf
+  nexperia_bc327:
+    title: Nexperia BC807/BC807W/BC327 datasheet
+    url: https://assets.nexperia.com/documents/data-sheet/BC807_BC807W_BC327.pdf
+  onsemi_bc517:
+    title: onsemi BC517 datasheet
+    url: https://www.onsemi.com/download/data-sheet/pdf/bc517-d74z-d.pdf
+  onsemi_bc516:
+    title: onsemi BC516 datasheet
+    url: https://www.onsemi.com/pdf/datasheet/bc516-d.pdf
+  onsemi_bd139:
+    title: onsemi BD139 datasheet
+    url: https://www.onsemi.com/download/data-sheet/pdf/bd139-d.pdf
+  onsemi_bd140:
+    title: onsemi BD140 datasheet
+    url: https://www.onsemi.com/download/data-sheet/pdf/bd136-d.pdf
+  utc_lp2950:
+    title: UTC LP2950/LP2951 datasheet
+    url: https://www.unisonic.com.tw/uploadfiles/836/part_no_pdf/LP2950_2951.pdf
+
+inventories:
+  whadda_k_trans1:
+    description: Whadda/Velleman K/TRANS1 transistor assortment
+    total_quantity: 100
+    source: whadda_k_trans1
+    provenance:
+      dataset: mege-wms Airtable export 20260717_140607
+      item_key: 655
+      carrier_key: 5882
+      attachment: 2026-02-28 15.38.45.jpg
+    quantities:
+      BC547B: 28
+      BC557B: 28
+      BC337: 12
+      BC327: 12
+      BC517: 6
+      BC516: 6
+      BD139: 4
+      BD140: 4
+
+devices:
+  BC547B:
+    package: TO-92
+    kind: bjt_npn
+    description: NPN transistor
+    aliases: [BC547]
+    default_pinout: cbe
+    pinouts:
+      cbe:
+        pins: {1: collector, 2: base, 3: emitter}
+        sources: [onsemi_bc547b]
+
+  BC557B:
+    package: TO-92
+    kind: bjt_pnp
+    description: PNP transistor
+    aliases: [BC557]
+    default_pinout: cbe
+    pinouts:
+      cbe:
+        pins: {1: collector, 2: base, 3: emitter}
+        sources: [onsemi_bc557b]
+
+  BC337:
+    package: TO-92
+    kind: bjt_npn
+    description: NPN transistor
+    default_pinout: cbe
+    selection_note: The K/TRANS1 supplier does not identify the semiconductor manufacturer; verify the received part before insertion.
+    pinouts:
+      cbe:
+        pins: {1: collector, 2: base, 3: emitter}
+        manufacturer: onsemi
+        sources: [onsemi_bc337]
+      ebc:
+        pins: {1: emitter, 2: base, 3: collector}
+        manufacturer: Nexperia
+        package_designation: SOT54
+        sources: [nexperia_bc337]
+
+  BC327:
+    package: TO-92
+    kind: bjt_pnp
+    description: PNP transistor
+    default_pinout: cbe
+    selection_note: The K/TRANS1 supplier does not identify the semiconductor manufacturer; verify the received part before insertion.
+    pinouts:
+      cbe:
+        pins: {1: collector, 2: base, 3: emitter}
+        manufacturer: onsemi
+        sources: [onsemi_bc327]
+      ebc:
+        pins: {1: emitter, 2: base, 3: collector}
+        manufacturer: Nexperia
+        package_designation: SOT54
+        sources: [nexperia_bc327]
+
+  BC517:
+    package: TO-92
+    kind: bjt_npn_darlington
+    description: NPN Darlington transistor
+    default_pinout: cbe
+    pinouts:
+      cbe:
+        pins: {1: collector, 2: base, 3: emitter}
+        sources: [onsemi_bc517]
+
+  BC516:
+    package: TO-92
+    kind: bjt_pnp_darlington
+    description: PNP Darlington transistor
+    default_pinout: cbe
+    pinouts:
+      cbe:
+        pins: {1: collector, 2: base, 3: emitter}
+        sources: [onsemi_bc516]
+
+  BD139:
+    package: TO-126
+    kind: bjt_npn
+    description: NPN transistor
+    default_pinout: ecb
+    pinouts:
+      ecb:
+        pins: {1: emitter, 2: collector, 3: base}
+        sources: [onsemi_bd139]
+
+  BD140:
+    package: TO-126
+    kind: bjt_pnp
+    description: PNP transistor
+    default_pinout: ecb
+    pinouts:
+      ecb:
+        pins: {1: emitter, 2: collector, 3: base}
+        sources: [onsemi_bd140]
+
+  UTC_LP2950L_33_T92:
+    package: TO-92
+    kind: voltage_regulator
+    description: Positive 3.3 V low-dropout regulator
+    marking: UTC / LP2950L / 33
+    evidence:
+      received_photo_repository: mege-ender-3v3ke-idex
+      received_photo_path: resources/tmc5160TPlus/IMG_9785.png
+    aliases:
+      - LP2950L-3.3
+      - LP2950L-33-T92-B
+      - LP2950L-33-T92-K
+    default_pinout: out_gnd_in
+    pinouts:
+      out_gnd_in:
+        pins: {1: output, 2: ground, 3: input}
+        manufacturer: Unisonic Technologies
+        sources: [utc_lp2950]

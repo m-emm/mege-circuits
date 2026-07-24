@@ -5,6 +5,10 @@ from __future__ import annotations
 import math
 from xml.etree import ElementTree as ET
 
+from mege_circuits.pinout.catalog import (
+    PackageDefinition,
+    load_component_catalog,
+)
 from mege_circuits.pinout.config import (
     DiscreteComponentPlacement,
     PinoutProject,
@@ -100,11 +104,16 @@ def _add_line(
 
 
 def _component_attrs(component: DiscreteComponentPlacement) -> dict[str, str]:
-    return {
+    attrs = {
         "data-component": component.ref,
         "data-kind": component.kind,
         "data-value": component.value,
     }
+    if component.part is not None:
+        attrs["data-part"] = component.part
+    if component.pinout_variant is not None:
+        attrs["data-pinout-variant"] = component.pinout_variant
+    return attrs
 
 
 def _component_group(
@@ -635,6 +644,270 @@ def _draw_dip(
     )
 
 
+def _add_vector(
+    point: tuple[float, float],
+    vector: tuple[float, float],
+    scale: float,
+) -> tuple[float, float]:
+    return point[0] + vector[0] * scale, point[1] + vector[1] * scale
+
+
+def _three_lead_package_definition(
+    component: DiscreteComponentPlacement,
+) -> tuple[
+    PackageDefinition,
+    dict[int, str],
+    dict[int, str],
+]:
+    catalog = load_component_catalog()
+    if component.kind == "to92":
+        return (
+            catalog.packages["TO-92"],
+            {1: "pin1", 2: "pin2", 3: "pin3"},
+            {1: "1", 2: "2", 3: "3"},
+        )
+
+    if component.part is None:
+        raise ValueError(f"{component.ref} requires a catalog part")
+    device = catalog.resolve_device(component.part)
+    pinout = device.resolve_pinout(component.pinout_variant)
+    if device.package != "TO-92":
+        raise ValueError(
+            f"{component.ref} uses unsupported three-lead package {device.package}"
+        )
+    label_by_terminal = {
+        "collector": "C",
+        "base": "B",
+        "emitter": "E",
+        "output": "OUT",
+        "ground": "GND",
+        "input": "IN",
+    }
+    return (
+        catalog.packages[device.package],
+        pinout.pins,
+        {
+            number: label_by_terminal[terminal]
+            for number, terminal in pinout.pins.items()
+        },
+    )
+
+
+def _three_lead_orientation(
+    component: DiscreteComponentPlacement,
+    package: PackageDefinition,
+    terminal_by_number: dict[int, str],
+    positions: dict[str, tuple[float, float]],
+) -> tuple[
+    dict[int, tuple[float, float]],
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+]:
+    pin_positions = {
+        number: positions[component.terminals[terminal]]
+        for number, terminal in terminal_by_number.items()
+    }
+    ordered_numbers = package.marked_face_lead_order
+    if ordered_numbers != (1, 2, 3):
+        raise ValueError(
+            f"{component.ref} requires a three-lead package ordered 1, 2, 3"
+        )
+
+    pin_one = pin_positions[1]
+    pin_two = pin_positions[2]
+    pin_three = pin_positions[3]
+    if len(set(pin_positions.values())) != 3:
+        raise ValueError(f"{component.ref} three-lead positions must be distinct")
+
+    row_dx = pin_three[0] - pin_one[0]
+    row_dy = pin_three[1] - pin_one[1]
+    row_length = math.hypot(row_dx, row_dy)
+    if row_length == 0:
+        raise ValueError(f"{component.ref} pin 1 and pin 3 must be distinct")
+    row_unit = row_dx / row_length, row_dy / row_length
+
+    pin_two_dx = pin_two[0] - pin_one[0]
+    pin_two_dy = pin_two[1] - pin_one[1]
+    cross_product = pin_two_dx * row_unit[1] - pin_two_dy * row_unit[0]
+    pin_two_projection = pin_two_dx * row_unit[0] + pin_two_dy * row_unit[1]
+    if abs(cross_product) > 1e-6 or not 0 < pin_two_projection < row_length:
+        raise ValueError(
+            f"{component.ref} three-lead positions must be collinear in "
+            "package-number order"
+        )
+
+    body_normal = row_unit[1], -row_unit[0]
+    if package.body_side == "left_of_pin1_to_pin3":
+        body_normal = -body_normal[0], -body_normal[1]
+    elif package.body_side != "right_of_pin1_to_pin3":
+        raise ValueError(
+            f"Unsupported body-side convention for {package.id}: "
+            f"{package.body_side!r}"
+        )
+    row_center = (
+        (pin_one[0] + pin_three[0]) / 2.0,
+        (pin_one[1] + pin_three[1]) / 2.0,
+    )
+    return pin_positions, row_center, row_unit, body_normal
+
+
+def _draw_three_lead_package(
+    root: ET.Element,
+    bounds: _SvgBounds,
+    component: DiscreteComponentPlacement,
+    positions: dict[str, tuple[float, float]],
+) -> None:
+    package, terminal_by_number, label_by_number = _three_lead_package_definition(
+        component
+    )
+    (
+        pin_positions,
+        row_center,
+        row_unit,
+        body_normal,
+    ) = _three_lead_orientation(
+        component,
+        package,
+        terminal_by_number,
+        positions,
+    )
+
+    pin_span = math.dist(pin_positions[1], pin_positions[3])
+    body_half_span = max(34.0, pin_span / 2.0 + 10.0)
+    flat_offset = PIN_RADIUS + 3.0
+    body_depth = 48.0
+    flat_center = _add_vector(row_center, body_normal, flat_offset)
+    flat_start = _add_vector(flat_center, row_unit, -body_half_span)
+    flat_end = _add_vector(flat_center, row_unit, body_half_span)
+    curved_center = _add_vector(flat_center, body_normal, body_depth)
+    bezier_factor = 0.5522847498
+    first_control = _add_vector(flat_end, body_normal, body_depth * bezier_factor)
+    second_control = _add_vector(
+        curved_center, row_unit, body_half_span * bezier_factor
+    )
+    third_control = _add_vector(
+        curved_center, row_unit, -body_half_span * bezier_factor
+    )
+    fourth_control = _add_vector(flat_start, body_normal, body_depth * bezier_factor)
+
+    group = _component_group(root, component)
+    attrs = _component_attrs(component)
+    package_attrs = {**attrs, "data-package": package.id}
+    terminal_label_positions = {}
+    for number in package.marked_face_lead_order:
+        terminal = terminal_by_number[number]
+        pin_position = pin_positions[number]
+        body_point = _add_vector(pin_position, body_normal, flat_offset)
+        _add_line(
+            group,
+            bounds,
+            pin_position,
+            body_point,
+            class_name="to92-lead",
+            data_attrs={
+                **package_attrs,
+                "data-terminal": terminal,
+                "data-pin-number": str(number),
+            },
+        )
+        terminal_label_positions[number] = (
+            terminal,
+            _add_vector(body_point, body_normal, 11.0),
+        )
+
+    path_data = (
+        f"M {flat_start[0]:g} {flat_start[1]:g} "
+        f"L {flat_end[0]:g} {flat_end[1]:g} "
+        f"C {first_control[0]:g} {first_control[1]:g} "
+        f"{second_control[0]:g} {second_control[1]:g} "
+        f"{curved_center[0]:g} {curved_center[1]:g} "
+        f"C {third_control[0]:g} {third_control[1]:g} "
+        f"{fourth_control[0]:g} {fourth_control[1]:g} "
+        f"{flat_start[0]:g} {flat_start[1]:g} Z"
+    )
+    body_extent_points = (
+        flat_start,
+        flat_end,
+        _add_vector(flat_start, body_normal, body_depth),
+        _add_vector(flat_end, body_normal, body_depth),
+    )
+    body_min_x = min(point[0] for point in body_extent_points)
+    body_min_y = min(point[1] for point in body_extent_points)
+    body_max_x = max(point[0] for point in body_extent_points)
+    body_max_y = max(point[1] for point in body_extent_points)
+    bounds.add_rect((body_min_x - 2, body_min_y - 2, body_max_x + 2, body_max_y + 2))
+    ET.SubElement(
+        group,
+        "path",
+        {
+            "d": path_data,
+            "fill": "#d1d5db",
+            "stroke": "#111827",
+            "stroke-width": "1.5",
+            "class": "to92-body",
+            **package_attrs,
+            "data-body-min-x": f"{body_min_x:g}",
+            "data-body-min-y": f"{body_min_y:g}",
+            "data-body-max-x": f"{body_max_x:g}",
+            "data-body-max-y": f"{body_max_y:g}",
+        },
+    )
+    _add_line(
+        group,
+        bounds,
+        flat_start,
+        flat_end,
+        class_name="to92-flat-face",
+        data_attrs=package_attrs,
+        stroke="#111827",
+        stroke_width=1.5,
+    )
+    for number in package.marked_face_lead_order:
+        terminal, label_position = terminal_label_positions[number]
+        _add_text(
+            group,
+            bounds,
+            label_by_number[number],
+            x=label_position[0],
+            y=label_position[1] + 3.0,
+            font_size=8,
+            fill="#374151",
+            class_name="to92-terminal-label",
+            data_attrs={
+                **package_attrs,
+                "data-terminal": terminal,
+                "data-pin-number": str(number),
+            },
+        )
+    caption_center = _add_vector(flat_center, body_normal, body_depth * 0.58)
+    ref_position = _add_vector(caption_center, row_unit, -5.0)
+    _add_text(
+        group,
+        bounds,
+        component.ref,
+        x=ref_position[0],
+        y=ref_position[1] + 3.0,
+        font_size=10,
+        fill="#111827",
+        font_weight="bold",
+        class_name="discrete-component-ref",
+        data_attrs=package_attrs,
+    )
+    value_position = _add_vector(caption_center, row_unit, 10.0)
+    _add_text(
+        group,
+        bounds,
+        component.value,
+        x=value_position[0],
+        y=value_position[1] + 3.0,
+        font_size=8,
+        fill="#374151",
+        class_name="discrete-component-value",
+        data_attrs=package_attrs,
+    )
+
+
 def _draw_component(
     root: ET.Element,
     bounds: _SvgBounds,
@@ -649,6 +922,8 @@ def _draw_component(
         _draw_diode(root, bounds, component, positions)
     elif component.kind == "bjt_pnp":
         _draw_bjt_pnp(root, bounds, component, positions)
+    elif component.kind in {"to92", "bjt_npn", "voltage_regulator"}:
+        _draw_three_lead_package(root, bounds, component, positions)
     elif component.kind == "dip":
         _draw_dip(root, bounds, component, positions)
     else:
@@ -665,6 +940,9 @@ def _component_terminal_labels(
         "collector": "C",
         "base": "B",
         "emitter": "E",
+        "output": "OUT",
+        "ground": "GND",
+        "input": "IN",
     }
     for component in placements:
         if component.kind == "dip":

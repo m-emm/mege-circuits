@@ -287,3 +287,291 @@ discrete_view:
     assert math.dist(polarity_labels["cathode"][1], pin_positions["A02"]) < math.dist(
         polarity_labels["cathode"][1], pin_positions["A05"]
     )
+
+
+def _three_lead_nodes(root, component_ref):
+    body = next(
+        node
+        for node in root.iter(f"{SVG_NAMESPACE}path")
+        if node.attrib.get("class") == "to92-body"
+        and node.attrib.get("data-component") == component_ref
+    )
+    flat_face = next(
+        node
+        for node in root.iter(f"{SVG_NAMESPACE}line")
+        if node.attrib.get("class") == "to92-flat-face"
+        and node.attrib.get("data-component") == component_ref
+    )
+    leads = {
+        node.attrib["data-terminal"]: node
+        for node in root.iter(f"{SVG_NAMESPACE}line")
+        if node.attrib.get("class") == "to92-lead"
+        and node.attrib.get("data-component") == component_ref
+    }
+    labels = {
+        node.attrib["data-terminal"]: node
+        for node in root.iter(f"{SVG_NAMESPACE}text")
+        if node.attrib.get("class") == "to92-terminal-label"
+        and node.attrib.get("data-component") == component_ref
+    }
+    return body, flat_face, leads, labels
+
+
+def _pin_positions(root):
+    return {
+        node.attrib["data-pin"]: (
+            float(node.attrib["cx"]),
+            float(node.attrib["cy"]),
+        )
+        for node in root.iter(f"{SVG_NAMESPACE}circle")
+        if node.attrib.get("class") == "discrete-pin"
+    }
+
+
+def test_generate_discrete_top_svg_orients_numbered_to92_from_pin1_to_pin3(
+    tmp_path,
+):
+    config_path = tmp_path / "to92.yaml"
+    config_path.write_text(
+        """
+basename: to92
+pin_sets:
+  - id: regulator
+    prefix: U3_
+    origin: [0, 2]
+    direction: down
+    pins: [OUT, GND, IN]
+pins:
+  GND_BUS: [3, 1]
+wires:
+  - from: U3_GND
+    to: GND_BUS
+component_placements:
+  - ref: U3
+    kind: to92
+    value: LP2950L-3.3
+    terminals: {pin1: U3_OUT, pin2: U3_GND, pin3: U3_IN}
+discrete_view:
+  title: TO-92 placement test
+  groups:
+    - id: regulator
+      label: Regulator
+      pin_sets: [regulator]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    project = load_pinout_config(config_path)
+    svg_content = generate_discrete_top_svg(project)
+    root = ET.fromstring(svg_content)
+    body, flat_face, leads, labels = _three_lead_nodes(root, "U3")
+    pins = _pin_positions(root)
+
+    assert 'data-component="U3"' in svg_content
+    assert 'class="to92-body"' in svg_content
+    assert 'class="to92-terminal-label"' in svg_content
+    assert "LP2950L-3.3" in svg_content
+    assert float(body.attrib["data-body-min-x"]) > pins["U3_OUT"][0]
+    assert float(flat_face.attrib["x1"]) == pytest.approx(float(flat_face.attrib["x2"]))
+    assert float(flat_face.attrib["x1"]) < float(body.attrib["data-body-max-x"])
+    assert {terminal: label.text for terminal, label in labels.items()} == {
+        "pin1": "1",
+        "pin2": "2",
+        "pin3": "3",
+    }
+    for terminal, pin_name in {
+        "pin1": "U3_OUT",
+        "pin2": "U3_GND",
+        "pin3": "U3_IN",
+    }.items():
+        assert (
+            float(leads[terminal].attrib["x1"]),
+            float(leads[terminal].attrib["y1"]),
+        ) == pytest.approx(pins[pin_name])
+
+
+def test_reversing_numbered_to92_pin_order_mirrors_the_body(tmp_path):
+    config_path = tmp_path / "reversed_to92.yaml"
+    config_path.write_text(
+        """
+basename: reversed_to92
+pins:
+  TOP: [0, 2]
+  MIDDLE: [0, 1]
+  BOTTOM: [0, 0]
+wires:
+  - from: TOP
+    to: MIDDLE
+component_placements:
+  - ref: Q1
+    kind: to92
+    value: unknown
+    terminals: {pin1: BOTTOM, pin2: MIDDLE, pin3: TOP}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    root = ET.fromstring(generate_discrete_top_svg(load_pinout_config(config_path)))
+    body, flat_face, _, _ = _three_lead_nodes(root, "Q1")
+    pins = _pin_positions(root)
+
+    assert float(body.attrib["data-body-max-x"]) < pins["TOP"][0]
+    assert float(flat_face.attrib["x1"]) == pytest.approx(float(flat_face.attrib["x2"]))
+    assert float(flat_face.attrib["x1"]) > float(body.attrib["data-body-min-x"])
+
+
+def test_horizontal_to92_row_rotates_flat_face_and_body(tmp_path):
+    config_path = tmp_path / "horizontal_to92.yaml"
+    config_path.write_text(
+        """
+basename: horizontal_to92
+pins:
+  LEFT: [0, 0]
+  MIDDLE: [1, 0]
+  RIGHT: [2, 0]
+wires:
+  - from: LEFT
+    to: MIDDLE
+component_placements:
+  - ref: Q1
+    kind: to92
+    value: unknown
+    terminals: {pin1: LEFT, pin2: MIDDLE, pin3: RIGHT}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    root = ET.fromstring(generate_discrete_top_svg(load_pinout_config(config_path)))
+    body, flat_face, _, _ = _three_lead_nodes(root, "Q1")
+    pins = _pin_positions(root)
+
+    assert float(body.attrib["data-body-max-y"]) < pins["LEFT"][1]
+    assert float(flat_face.attrib["y1"]) == pytest.approx(float(flat_face.attrib["y2"]))
+    assert float(flat_face.attrib["y1"]) > float(body.attrib["data-body-min-y"])
+
+
+def test_catalog_backed_npn_variant_changes_package_orientation_not_semantics(
+    tmp_path,
+):
+    config_template = """
+basename: npn
+pins:
+  COLLECTOR: [0, 2]
+  BASE: [0, 1]
+  EMITTER: [0, 0]
+wires:
+  - from: COLLECTOR
+    to: BASE
+component_placements:
+  - ref: Q1
+    kind: bjt_npn
+    part: BC337
+{variant_line}
+    value: BC337
+    terminals: {{collector: COLLECTOR, base: BASE, emitter: EMITTER}}
+"""
+    bodies = {}
+    for variant in ("cbe", "ebc"):
+        config_path = tmp_path / f"npn_{variant}.yaml"
+        config_path.write_text(
+            config_template.format(
+                variant_line=("    pinout_variant: ebc" if variant == "ebc" else "")
+            ).strip(),
+            encoding="utf-8",
+        )
+        root = ET.fromstring(generate_discrete_top_svg(load_pinout_config(config_path)))
+        body, _, leads, labels = _three_lead_nodes(root, "Q1")
+        pins = _pin_positions(root)
+        bodies[variant] = body
+
+        assert {terminal: label.text for terminal, label in labels.items()} == {
+            "collector": "C",
+            "base": "B",
+            "emitter": "E",
+        }
+        for terminal, pin_name in {
+            "collector": "COLLECTOR",
+            "base": "BASE",
+            "emitter": "EMITTER",
+        }.items():
+            assert (
+                float(leads[terminal].attrib["x1"]),
+                float(leads[terminal].attrib["y1"]),
+            ) == pytest.approx(pins[pin_name])
+
+    pin_x = _pin_positions(
+        ET.fromstring(
+            generate_discrete_top_svg(load_pinout_config(tmp_path / "npn_cbe.yaml"))
+        )
+    )["COLLECTOR"][0]
+    assert float(bodies["cbe"].attrib["data-body-min-x"]) > pin_x
+    assert float(bodies["ebc"].attrib["data-body-max-x"]) < pin_x
+
+
+def test_catalog_backed_regulator_uses_semantic_labels_and_utc_pinout(tmp_path):
+    config_path = tmp_path / "regulator.yaml"
+    config_path.write_text(
+        """
+basename: regulator
+pins:
+  OUT: [0, 2]
+  GND: [0, 1]
+  IN: [0, 0]
+wires:
+  - from: OUT
+    to: GND
+component_placements:
+  - ref: U3
+    kind: voltage_regulator
+    part: UTC_LP2950L_33_T92
+    value: LP2950L-3.3
+    terminals: {output: OUT, ground: GND, input: IN}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    root = ET.fromstring(generate_discrete_top_svg(load_pinout_config(config_path)))
+    body, _, leads, labels = _three_lead_nodes(root, "U3")
+    pins = _pin_positions(root)
+
+    assert body.attrib["data-part"] == "UTC_LP2950L_33_T92"
+    assert float(body.attrib["data-body-min-x"]) > pins["OUT"][0]
+    assert {terminal: label.text for terminal, label in labels.items()} == {
+        "output": "OUT",
+        "ground": "GND",
+        "input": "IN",
+    }
+    for terminal, pin_name in {
+        "output": "OUT",
+        "ground": "GND",
+        "input": "IN",
+    }.items():
+        assert (
+            float(leads[terminal].attrib["x1"]),
+            float(leads[terminal].attrib["y1"]),
+        ) == pytest.approx(pins[pin_name])
+
+
+def test_three_lead_renderer_rejects_non_collinear_positions(tmp_path):
+    config_path = tmp_path / "non_collinear_to92.yaml"
+    config_path.write_text(
+        """
+basename: non_collinear_to92
+pins:
+  P1: [0, 2]
+  P2: [1, 1]
+  P3: [0, 0]
+wires:
+  - from: P1
+    to: P2
+component_placements:
+  - ref: Q1
+    kind: to92
+    value: unknown
+    terminals: {pin1: P1, pin2: P2, pin3: P3}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must be collinear"):
+        generate_discrete_top_svg(load_pinout_config(config_path))

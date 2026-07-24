@@ -559,3 +559,86 @@ component_placements:
 
     with pytest.raises(ValueError, match=message):
         load_pinout_config(config_path)
+
+
+@pytest.mark.parametrize(
+    ("placement", "message"),
+    [
+        (
+            """
+  - ref: Q1
+    kind: bjt_npn
+    part: NOT_A_PART
+    value: unknown
+    terminals: {collector: P1, base: P2, emitter: P3}
+""",
+            "Unknown catalog part",
+        ),
+        (
+            """
+  - ref: Q1
+    kind: bjt_npn
+    part: BC337
+    pinout_variant: not_a_variant
+    value: BC337
+    terminals: {collector: P1, base: P2, emitter: P3}
+""",
+            "Unknown pinout variant",
+        ),
+        (
+            """
+  - ref: Q1
+    kind: bjt_npn
+    part: BC327
+    value: BC327
+    terminals: {collector: P1, base: P2, emitter: P3}
+""",
+            "does not match catalog part",
+        ),
+        (
+            """
+  - ref: Q1
+    kind: bjt_npn
+    part: BD139
+    value: BD139
+    terminals: {collector: P1, base: P2, emitter: P3}
+""",
+            "currently supports TO-92",
+        ),
+        (
+            """
+  - ref: U3
+    kind: voltage_regulator
+    part: UTC_LP2950L_33_T92
+    value: LP2950L-3.3
+    terminals: {output: P1, ground: P2, emitter: P3}
+""",
+            "terminals for voltage_regulator must be exactly",
+        ),
+    ],
+)
+def test_load_pinout_config_rejects_invalid_catalog_backed_placements(
+    tmp_path: Path,
+    placement: str,
+    message: str,
+):
+    config_path = tmp_path / "catalog_placement.yaml"
+    config_path.write_text(
+        (
+            """
+pins:
+  P1: [0, 2]
+  P2: [0, 1]
+  P3: [0, 0]
+wires:
+  - from: P1
+    to: P2
+component_placements:
+"""
+            + placement
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        load_pinout_config(config_path)

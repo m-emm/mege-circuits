@@ -28,6 +28,7 @@ from mege_circuits.simple import (
     ERCReport,
     Ground,
     HexOpenCollectorBuffer,
+    LinearRegulator,
     Resistor,
     Stripboard,
     StripboardBlocker,
@@ -343,6 +344,20 @@ def test_extended_analog_elements_render_with_stable_terminals(tmp_path):
         "ILD74",
         **optocoupler_nodes,
     )
+    regulator_nodes = {
+        terminal: create_node(
+            Dot,
+            f"regulator_{terminal}",
+            net=create_net(f"regulator_{terminal}"),
+        )
+        for terminal in ("input", "ground", "output")
+    }
+    regulator = create_element(
+        LinearRegulator,
+        "U3",
+        "LP2950L-3.3",
+        **regulator_nodes,
+    )
     schema = create_schema(
         [
             anode,
@@ -351,8 +366,9 @@ def test_extended_analog_elements_render_with_stable_terminals(tmp_path):
             collector,
             emitter,
             *optocoupler_nodes.values(),
+            *regulator_nodes.values(),
         ],
-        [diode, transistor, optocoupler],
+        [diode, transistor, optocoupler, regulator],
     )
     outfile = tmp_path / "extended_analog_elements.svg"
 
@@ -364,6 +380,7 @@ def test_extended_analog_elements_render_with_stable_terminals(tmp_path):
         "diode",
         "bjt_pnp",
         "dual_optocoupler",
+        "linear_regulator",
     ]
     assert transistor.base.position == pytest.approx((-0.752, 0.0))
     assert transistor.collector.position == pytest.approx((0.0, -0.697))
@@ -372,6 +389,9 @@ def test_extended_analog_elements_render_with_stable_terminals(tmp_path):
     assert optocoupler.b_emitter.position == pytest.approx(
         (1.2016666666666664, -2.046666666666667)
     )
+    assert regulator.input.position == pytest.approx((-1.5, 0.0))
+    assert regulator.ground.position == pytest.approx((0.0, -1.6))
+    assert regulator.output.position == pytest.approx((1.5, 0.0))
 
 
 def test_hex_open_collector_buffer_renders_with_dip_pin_terminals(tmp_path):

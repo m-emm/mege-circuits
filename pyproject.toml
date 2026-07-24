@@ -50,6 +50,9 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"mege_circuits.pinout" = ["component_catalog.yaml"]
+
 [tool.setuptools_scm]
 fallback_version = "0.1.0"
 
